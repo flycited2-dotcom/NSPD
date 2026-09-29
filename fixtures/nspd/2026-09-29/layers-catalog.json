@@ -1,0 +1,382 @@
+{
+  "layers": [
+    {
+      "title": "Кадастровые округа",
+      "layerId": 36945,
+      "layerType": "wms",
+      "categoryId": 38030
+    },
+    {
+      "title": "Кадастровые районы ",
+      "layerId": 36070,
+      "layerType": "wms",
+      "categoryId": 36382
+    },
+    {
+      "title": "Кадастровые кварталы",
+      "layerId": 36071,
+      "layerType": "wms",
+      "categoryId": 36381
+    },
+    {
+      "title": "Государственная граница Российской Федерации",
+      "layerId": 37313,
+      "layerType": "wms",
+      "categoryId": 38998
+    },
+    {
+      "title": "Субъекты Российской Федерации (линии)",
+      "layerId": 875815,
+      "layerType": "wms",
+      "categoryId": 472796
+    },
+    {
+      "title": "Субъекты Российской Федерации (полигоны)",
+      "layerId": 875817,
+      "layerType": "wms",
+      "categoryId": 472798
+    },
+    {
+      "title": "Муниципальные образования (полигональный)",
+      "layerId": 875819,
+      "layerType": "wms",
+      "categoryId": 472800
+    },
+    {
+      "title": "Муниципальные образования (линейный)",
+      "layerId": 875824,
+      "layerType": "wms",
+      "categoryId": 472805
+    },
+    {
+      "title": "Населённые пункты (полигоны)",
+      "layerId": 875831,
+      "layerType": "wms",
+      "categoryId": 472812
+    },
+    {
+      "title": "Населённые пункты (линии)",
+      "layerId": 875882,
+      "layerType": "wms",
+      "categoryId": 472860
+    },
+    {
+      "title": "Земельные участки из ЕГРН",
+      "layerId": 36048,
+      "layerType": "wms",
+      "categoryId": 36368
+    },
+    {
+      "title": "Земельные участки, образуемые по схеме расположения земельного участка",
+      "layerId": 37294,
+      "layerType": "wms",
+      "categoryId": 38943
+    },
+    {
+      "title": "Земельные участки, выставленные на аукцион ",
+      "layerId": 37299,
+      "layerType": "wms",
+      "categoryId": 38981
+    },
+    {
+      "title": "Земельные участки, свободные от прав третьих лиц",
+      "layerId": 37298,
+      "layerType": "wms",
+      "categoryId": 38979
+    },
+    {
+      "title": "Земельные участки, образуемые по проекту межевания территории",
+      "layerId": 36473,
+      "layerType": "wms",
+      "categoryId": 37158
+    },
+    {
+      "title": "Здания",
+      "layerId": 36049,
+      "layerType": "wms",
+      "categoryId": 36369
+    },
+    {
+      "title": "Сооружения",
+      "layerId": 36328,
+      "layerType": "wms",
+      "categoryId": 36383
+    },
+    {
+      "title": "Объекты незавершенного строительства",
+      "layerId": 36329,
+      "layerType": "wms",
+      "categoryId": 36384
+    },
+    {
+      "title": "Единые недвижимые комплексы",
+      "layerId": 37433,
+      "layerType": "wms",
+      "categoryId": 39663
+    },
+    {
+      "title": "Предприятие как имущественный комплекс",
+      "layerId": 37434,
+      "layerType": "wms",
+      "categoryId": 39664
+    },
+    {
+      "title": "ЗОУИТ объектов культурного наследия",
+      "layerId": 37577,
+      "layerType": "wms",
+      "categoryId": 36940
+    },
+    {
+      "title": "ЗОУИТ объектов энергетики, связи, транспорта",
+      "layerId": 37578,
+      "layerType": "wms",
+      "categoryId": 36940
+    },
+    {
+      "title": "ЗОУИТ природных территорий",
+      "layerId": 37580,
+      "layerType": "wms",
+      "categoryId": 36940
+    },
+    {
+      "title": "ЗОУИТ охраняемых объектов и безопасности",
+      "layerId": 37579,
+      "layerType": "wms",
+      "categoryId": 36940
+    },
+    {
+      "title": "Иные ЗОУИТ",
+      "layerId": 37581,
+      "layerType": "wms",
+      "categoryId": 36940
+    },
+    {
+      "title": "Территориальные зоны",
+      "layerId": 875838,
+      "layerType": "wms",
+      "categoryId": 472819
+    },
+    {
+      "title": "Красные линии ",
+      "layerId": 879243,
+      "layerType": "wms",
+      "categoryId": 38942
+    },
+    {
+      "title": "Особо охраняемые природные территории ",
+      "layerId": 875845,
+      "layerType": "wms",
+      "categoryId": 472825
+    },
+    {
+      "title": "Охотничьи угодья",
+      "layerId": 875847,
+      "layerType": "wms",
+      "categoryId": 472827
+    },
+    {
+      "title": "Лесничества",
+      "layerId": 875866,
+      "layerType": "wms",
+      "categoryId": 472847
+    },
+    {
+      "title": "Граница лесопарка",
+      "layerId": 875874,
+      "layerType": "wms",
+      "categoryId": 472853
+    },
+    {
+      "title": "Береговые линии (границы водных объектов) (полигональный)",
+      "layerId": 875832,
+      "layerType": "wms",
+      "categoryId": 472813
+    },
+    {
+      "title": "Береговые линии (границы водных объектов)(линейный)",
+      "layerId": 875835,
+      "layerType": "wms",
+      "categoryId": 472816
+    },
+    {
+      "title": "Особые экономические зоны",
+      "layerId": 875846,
+      "layerType": "wms",
+      "categoryId": 472826
+    },
+    {
+      "title": "Территории опережающего развития",
+      "layerId": 875848,
+      "layerType": "wms",
+      "categoryId": 472828
+    },
+    {
+      "title": "Игорные зоны",
+      "layerId": 875865,
+      "layerType": "wms",
+      "categoryId": 472846
+    },
+    {
+      "title": "Территории объектов культурного наследия",
+      "layerId": 875840,
+      "layerType": "wms",
+      "categoryId": 472820
+    },
+    {
+      "title": "Территории выполнения комплексных кадастровых работ",
+      "layerId": 37430,
+      "layerType": "wms",
+      "categoryId": 39228
+    },
+    {
+      "title": "Территория проведения мероприятий по ликвидации накопленного вреда окружающей среде, образовавшегося в результате производства химической продукции в г. Усолье-Сибирское Иркутской области",
+      "layerId": 37295,
+      "layerType": "wms",
+      "categoryId": 38944
+    },
+    {
+      "title": "Водная эрозия",
+      "layerId": 872153,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Линейная эрозия",
+      "layerId": 872155,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Ветровая эрозия",
+      "layerId": 872164,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Опустынивание",
+      "layerId": 872182,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Переувлажнение",
+      "layerId": 872183,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Подтопление",
+      "layerId": 872202,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Заболачивание",
+      "layerId": 872203,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Затопление",
+      "layerId": 872205,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Захламление",
+      "layerId": 872206,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Обвально-осыпные и оползневые процессы",
+      "layerId": 872210,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Абразия",
+      "layerId": 872211,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Иные нарушенные земли ",
+      "layerId": 872212,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при наземном строительстве ",
+      "layerId": 872213,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при гидротехническом строительстве",
+      "layerId": 872216,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при недропользовании",
+      "layerId": 872217,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при промышленном лесопользовании",
+      "layerId": 872218,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при сельскохозяйственном освоении",
+      "layerId": 872219,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при проведении геологоразведочных, испытательных, эксплуатационных и иных работ",
+      "layerId": 872220,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Нарушенные земли при складировании и захоронении промышленных отходов, загрязнение земель",
+      "layerId": 872221,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Гари",
+      "layerId": 872222,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Негативный процесс отсутствует",
+      "layerId": 872224,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Засоление",
+      "layerId": 872262,
+      "layerType": "wms",
+      "categoryId": 38967
+    },
+    {
+      "title": "Кадастровая стоимость объекта",
+      "layerId": 37236,
+      "layerType": "wms",
+      "categoryId": 36368
+    },
+    {
+      "title": "Удельный показатель кадастровой стоимости",
+      "layerId": 37758,
+      "layerType": "wms",
+      "categoryId": 36368
+    }
+  ]
+}

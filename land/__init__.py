@@ -1,0 +1,1 @@
+"""Local land reconnaissance workspace."""
