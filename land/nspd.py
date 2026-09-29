@@ -109,6 +109,22 @@ def spatial_body(bounds, category):
 
 
 def search(project, params):
+    attempt = {'started_at': store.now(), 'state': 'running', 'mode': params.get('mode', 'parcels'),
+               'cadnum': str(params.get('cadnum', '')).strip(), 'bounds': params.get('bounds')}
+    store.set_setting('nspd_attempt_' + project, attempt)
+    started = time.monotonic()
+    try:
+        result = _search(project, params)
+    except Exception as exc:
+        attempt.update(state='error', error=str(exc), finished_at=store.now(), seconds=round(time.monotonic() - started, 2))
+        store.set_setting('nspd_attempt_' + project, attempt)
+        raise
+    attempt.update(state='done', count=result['count'], finished_at=store.now(), seconds=round(time.monotonic() - started, 2))
+    store.set_setting('nspd_attempt_' + project, attempt)
+    return result
+
+
+def _search(project, params):
     mode = params.get('mode', 'parcels')
     query = str(params.get('cadnum', '')).strip()
     if mode == 'snapshot':

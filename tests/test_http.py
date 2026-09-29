@@ -81,3 +81,21 @@ def test_nspd_watchlist_and_export_preserve_provenance(server):
         assert exported['metadata']['complete'] is False
         assert exported['metadata']['snapshot'] is True
     assert store.candidates('trudovoe') == []
+
+
+def test_nspd_area_validates_and_preserves_previous(server):
+    bounds = [34.202, 44.991, 34.209, 44.996]
+    with request(server, '/api/nspd/area', {'bounds': bounds}) as r:
+        assert json.load(r)['official_boundary'] is False
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server, '/api/nspd/area', {'bounds': [0, 0, 100, 80]})
+    assert exc.value.code == 400
+    with request(server, '/api/nspd') as r:
+        assert json.load(r)['area']['bounds'] == bounds
+    assert store.layers('trudovoe') == []
+
+
+def test_nspd_interrupted_attempt_not_reported_as_success(server):
+    store.set_setting('nspd_attempt_trudovoe', {'state': 'running', 'started_at': store.now()})
+    with request(server, '/api/nspd') as r:
+        assert json.load(r)['attempt']['state'] == 'interrupted'

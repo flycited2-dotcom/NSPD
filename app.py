@@ -103,7 +103,13 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == '/api/session':
                 return self.send({'token': TOKEN, 'app': 'land-recon'})
             if p.path == '/api/nspd':
-                return self.send({'result': store.get_setting('nspd_' + project, None), 'watchlist': store.get_setting('nspd_watch_' + project, [])})
+                attempt = store.get_setting('nspd_attempt_' + project, None)
+                with JOB_LOCK:
+                    active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
+                if attempt and attempt['state'] == 'running' and not active:
+                    attempt = dict(attempt, state='interrupted', error='Приложение перезапущено или выполнение прервано; результат не подтверждён.')
+                return self.send({'result': store.get_setting('nspd_' + project, None), 'watchlist': store.get_setting('nspd_watch_' + project, []),
+                                  'area': store.get_setting('nspd_area_' + project, None), 'attempt': attempt})
             if p.path == '/api/nspd/export':
                 result = store.get_setting('nspd_' + project, None)
                 if not result:
@@ -147,6 +153,13 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == '/api/nspd/search':
                 return self.send(launch_job(project, 'Получение объектов НСПД', lambda: nspd.search(project, data)))
+            if path == '/api/nspd/area':
+                nspd.spatial_body(data.get('bounds'), nspd.catalog()['parcels']['categoryId'])
+                area = {'bounds': list(map(float, data['bounds'])), 'updated_at': store.now(), 'official_boundary': False}
+                store.set_setting('nspd_area_' + project, area)
+                with store.connect() as db:
+                    store.event(db, project, 'nspd_area', area)
+                return self.send(area)
             if path == '/api/nspd/watch':
                 with store.LOCK:
                     result = store.get_setting('nspd_' + project, {})

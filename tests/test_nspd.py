@@ -55,6 +55,9 @@ def test_failure_keeps_previous_result(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='403'):
         nspd.search('trudovoe', {'cadnum': '90:12:172101:420'})
     assert store.get_setting('nspd_trudovoe') == {'previous': True}
+    attempt = store.get_setting('nspd_attempt_trudovoe')
+    assert attempt['state'] == 'error' and '403' in attempt['error']
+    assert attempt['cadnum'] == '90:12:172101:420'
 
 
 def test_snapshot_never_claims_complete(tmp_path, monkeypatch):
@@ -65,3 +68,4 @@ def test_snapshot_never_claims_complete(tmp_path, monkeypatch):
     saved = store.get_setting('nspd_trudovoe')
     assert saved['snapshot'] and saved['complete'] is False
     assert saved['source_date'] == '2026-09-29'
+    assert store.get_setting('nspd_attempt_trudovoe')['state'] == 'done'
