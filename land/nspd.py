@@ -5,9 +5,12 @@ import math
 import re
 import threading
 import time
+import ssl
+import urllib.request
 from urllib.parse import urlencode
 
-import requests
+import httpx
+import truststore
 from pyproj import Transformer
 from shapely.geometry import shape, mapping, box
 from shapely.ops import transform
@@ -38,19 +41,24 @@ def request_json(url, body=None):
         time.sleep(max(0, 1 - (time.monotonic() - LAST_REQUEST)))
         LAST_REQUEST = time.monotonic()
         try:
-            with requests.request('POST' if body is not None else 'GET', url, json=body,
-                                  timeout=(8, 25), stream=True, allow_redirects=False,
-                                  headers={'Accept': 'application/json', 'User-Agent': 'LandRecon/1.0'}) as r:
-                if r.status_code != 200:
-                    raise ValueError(f'НСПД: HTTP {r.status_code}. Автоматические повторы не выполняются.')
-                chunks, size = [], 0
-                for chunk in r.iter_content(65536):
-                    size += len(chunk)
-                    if size > MAX_BYTES:
-                        raise ValueError('Ответ НСПД превышает 25 МБ. Уменьшите область.')
-                    chunks.append(chunk)
-                raw = b''.join(chunks)
-        except requests.RequestException as exc:
+            # HTTPX does not discover Windows registry proxy settings by itself.
+            # Preserve the same OS route as the earlier Requests client.
+            proxy = None if urllib.request.proxy_bypass('nspd.gov.ru') else urllib.request.getproxies().get('https')
+            context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            with httpx.Client(http2=True, verify=context, proxy=proxy,
+                              timeout=httpx.Timeout(25, connect=8), follow_redirects=False,
+                              headers={'Accept': 'application/json', 'User-Agent': 'LandRecon/1.0'}) as client:
+                with client.stream('POST' if body is not None else 'GET', url, json=body) as r:
+                    if r.status_code != 200:
+                        raise ValueError(f'НСПД: HTTP {r.status_code}. Автоматические повторы не выполняются.')
+                    chunks, size = [], 0
+                    for chunk in r.iter_bytes():
+                        size += len(chunk)
+                        if size > MAX_BYTES:
+                            raise ValueError('Ответ НСПД превышает 25 МБ. Уменьшите область.')
+                        chunks.append(chunk)
+                    raw = b''.join(chunks)
+        except httpx.HTTPError as exc:
             raise ValueError('НСПД не завершила запрос за отведённое время или разорвала соединение. Предыдущие результаты сохранены; можно открыть снимок браузера.') from exc
     try:
         data = json.loads(raw)

@@ -1,6 +1,7 @@
 import copy
 import json
 import pytest
+import httpx
 from land import nspd, store
 
 
@@ -69,3 +70,42 @@ def test_snapshot_never_claims_complete(tmp_path, monkeypatch):
     assert saved['snapshot'] and saved['complete'] is False
     assert saved['source_date'] == '2026-09-29'
     assert store.get_setting('nspd_attempt_trudovoe')['state'] == 'done'
+
+
+def test_transport_http2_proxy_tls_and_body(monkeypatch):
+    actual_client = httpx.Client
+    captured = {}
+    def handler(request):
+        captured['method'] = request.method
+        captured['body'] = json.loads(request.content)
+        return httpx.Response(200, json={'type': 'FeatureCollection', 'features': []})
+    def client(**kwargs):
+        captured.update(kwargs)
+        return actual_client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(nspd, 'public_url', lambda url: url)
+    monkeypatch.setattr(nspd.urllib.request, 'getproxies', lambda: {'https': 'http://127.0.0.1:9999'})
+    monkeypatch.setattr(nspd.urllib.request, 'proxy_bypass', lambda host: False)
+    monkeypatch.setattr(nspd.httpx, 'Client', client)
+    monkeypatch.setattr(nspd, 'LAST_REQUEST', 0)
+    body = {'categories': [{'id': 36368}]}
+    data, digest = nspd.request_json(nspd.INTERSECTS, body)
+    assert captured['http2'] is True and captured['follow_redirects'] is False
+    assert captured['verify'].verify_mode == nspd.ssl.CERT_REQUIRED
+    assert captured['proxy'] == 'http://127.0.0.1:9999'
+    assert captured['method'] == 'POST' and captured['body'] == body
+    assert data['features'] == [] and len(digest) == 64
+
+
+@pytest.mark.parametrize('status', [302, 401, 403, 429, 597])
+def test_transport_no_retry_or_redirect(status, monkeypatch):
+    actual_client = httpx.Client
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, headers={'Location': 'https://example.com'})
+    monkeypatch.setattr(nspd, 'public_url', lambda url: url)
+    monkeypatch.setattr(nspd.httpx, 'Client', lambda **kw: actual_client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(nspd, 'LAST_REQUEST', 0)
+    with pytest.raises(ValueError, match=str(status)):
+        nspd.request_json(nspd.INTERSECTS, {})
+    assert len(calls) == 1
