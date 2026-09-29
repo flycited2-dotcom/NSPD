@@ -99,3 +99,17 @@ def test_nspd_interrupted_attempt_not_reported_as_success(server):
     store.set_setting('nspd_attempt_trudovoe', {'state': 'running', 'started_at': store.now()})
     with request(server, '/api/nspd') as r:
         assert json.load(r)['attempt']['state'] == 'interrupted'
+
+
+def test_survey_watch_rejects_stale_and_deduplicates(server):
+    feature = {'type': 'Feature', 'id': 'gap-test', 'geometry': {'type':'Polygon','coordinates': [[[34,45],[34.01,45],[34.01,45.01],[34,45]]]}, 'properties': {'status':'unverified'}}
+    store.set_setting('survey_trudovoe', {'id':'survey1','created_at':store.now(),'gaps':{'type':'FeatureCollection','features':[feature]},'summary':{'complete':False}})
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server, '/api/survey/watch', {'survey_id':'old','id':'gap-test'})
+    assert exc.value.code == 400
+    for _ in range(2):
+        with request(server, '/api/survey/watch', {'survey_id':'survey1','id':'gap-test'}) as r:
+            assert json.load(r)['count'] == 1
+    with request(server, '/api/survey/export') as r:
+        assert json.load(r)['summary']['complete'] is False
+    assert store.candidates('trudovoe') == []

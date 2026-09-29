@@ -19,6 +19,7 @@ from land.network import audit_nspd, fetch_geojson, inspect_har
 from land.demo import fixture_layers
 from land.exports import bundle, dossier
 from land import nspd
+from land import survey
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -102,6 +103,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(state(project))
             if p.path == '/api/session':
                 return self.send({'token': TOKEN, 'app': 'land-recon'})
+            if p.path in ('/api/survey', '/api/survey/export'):
+                result = store.get_setting('survey_' + project, None)
+                attempt = store.get_setting('survey_attempt_' + project, None)
+                with JOB_LOCK:
+                    active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
+                if attempt and attempt['state'] == 'running' and not active:
+                    attempt = dict(attempt, state='interrupted', error='Обследование прервано; предыдущий результат не обновлён.')
+                if p.path.endswith('/export'):
+                    if not result:
+                        raise ValueError('Сначала выполните обследование')
+                    return self.send(result, filename='survey-unverified.json')
+                return self.send({'result': result, 'attempt': attempt, 'watchlist': store.get_setting('survey_watch_' + project, [])})
             if p.path == '/api/nspd':
                 attempt = store.get_setting('nspd_attempt_' + project, None)
                 with JOB_LOCK:
@@ -151,6 +164,21 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(size))
             project = project_name(data.get('project', 'trudovoe'))
             path = urlparse(self.path).path
+            if path == '/api/survey':
+                return self.send(launch_job(project, 'Обследование трёх слоёв', lambda: survey.run(project, data)))
+            if path == '/api/survey/watch':
+                with store.LOCK:
+                    result = store.get_setting('survey_' + project, {})
+                    if data.get('survey_id') != result.get('id'):
+                        raise ValueError('Результат изменился. Обновите страницу.')
+                    feature = next((f for f in result.get('gaps', {}).get('features', []) if f['id'] == data.get('id')), None)
+                    if not feature:
+                        raise ValueError('Промежуток не найден')
+                    items = store.get_setting('survey_watch_' + project, [])
+                    if not any(x['survey_id'] == result['id'] and x['feature']['id'] == feature['id'] for x in items):
+                        items.append({'survey_id': result['id'], 'feature': feature, 'added_at': store.now(), 'status': 'Требуется проверка', 'source_date': result['created_at']})
+                        store.set_setting('survey_watch_' + project, items)
+                return self.send({'count': len(items)})
             if path == '/api/nspd/search':
                 return self.send(launch_job(project, 'Получение объектов НСПД', lambda: nspd.search(project, data)))
             if path == '/api/nspd/area':
