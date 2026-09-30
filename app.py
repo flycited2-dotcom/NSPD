@@ -139,14 +139,17 @@ class Handler(BaseHTTPRequestHandler):
                 result = store.get_setting('torgi_documents_' + project, None)
                 attempt = store.get_setting('torgi_documents_attempt_' + project, None)
                 reading = store.get_setting('torgi_files_attempt_' + project, None)
+                reprocessing = store.get_setting('torgi_reprocess_attempt_' + project, None)
                 search = store.get_setting('torgi_' + project, None)
                 with JOB_LOCK:
                     active = any(j['state']=='running' and j['project']==project for j in JOBS.values())
                 if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
                 if reading and reading['state']=='running' and not active:reading=dict(reading,state='interrupted')
+                if reprocessing and reprocessing['state']=='running' and not active:reprocessing=dict(reprocessing,state='interrupted')
                 same = result and search and result.get('search_created_at')==search['created_at']
-                return self.send({'result':result,'attempt':attempt,'reading_attempt':reading,'current_search_id':(search or {}).get('id'),
+                return self.send({'result':result,'attempt':attempt,'reading_attempt':reading,'reprocess_attempt':reprocessing,'current_search_id':(search or {}).get('id'),
                                   'cards_remaining':len(torgi_docs.metadata_queue(search,result if same else {})) if search else 0,
+                                  'files_to_reprocess':len(torgi_docs.reprocess_queue(result or {})),
                                   'files_remaining':len(torgi_docs.file_queue(result or {}))},
                                  filename='torgi-documents.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/municipal', '/api/municipal/export'):
@@ -258,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Карточки и вложения ГИС Торги', lambda: torgi_docs.metadata(project, data)))
             if path == '/api/torgi/documents/read':
                 return self.send(launch_job(project, 'Чтение вложений ГИС Торги', lambda: torgi_docs.read(project, data)))
+            if path == '/api/torgi/documents/reprocess':
+                return self.send(launch_job(project, 'Локальное перечтение PDF торгов', lambda: torgi_docs.reprocess(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/torgi':

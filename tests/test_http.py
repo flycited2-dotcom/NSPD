@@ -197,6 +197,22 @@ def test_torgi_documents_export_preserves_scope_and_interruption(server):
     assert exc.value.code==403
 
 
+def test_torgi_local_reprocess_export_queue_and_post_guard(server):
+    store.set_setting('torgi_trudovoe',{'id':'search','created_at':'date','lots':[]})
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','search_created_at':'date','cards':[],
+                      'files':{'key':{'state':'read','format':'pdf','algorithm':'old','received_at':'source-date','eligible':True,
+                                      'egrn_tables':[{'outline_xy':[[1,2]],'geometry_confirmed':False,'georeferenced':False}]}}})
+    store.set_setting('torgi_reprocess_attempt_trudovoe',{'state':'running','network_requests':0})
+    with request(server,'/api/torgi/documents/export') as r:
+        body=json.load(r)
+        assert body['files_to_reprocess']==1 and body['reprocess_attempt']['state']=='interrupted'
+        assert body['result']['files']['key']['received_at']=='source-date'
+        assert not body['result']['files']['key']['egrn_tables'][0]['georeferenced']
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server,'/api/torgi/documents/reprocess',{'id':'docs'},token=False)
+    assert exc.value.code==403
+
+
 def test_georeference_export_keeps_preview_status_and_revisions(server):
     store.set_setting('schemes_trudovoe',{'id':'new-schemes','documents':[]})
     store.set_setting('survey_trudovoe',{'id':'new-survey'})

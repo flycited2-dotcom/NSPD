@@ -178,3 +178,28 @@ def test_child_timeout_and_wrong_hash(db,monkeypatch):
     with pytest.raises(ValueError,match='время'):docs.extract_file(db/'test.docx','a'*64,'docx')
     monkeypatch.setattr(docs.subprocess,'run',lambda *a,**kw:type('R',(),{'stdout':json.dumps({'sha256':'wrong','algorithm':docs.ALGORITHM}),'returncode':0})())
     with pytest.raises(ValueError,match='другому'):docs.extract_file(db/'test.docx','a'*64,'docx')
+
+
+def test_local_pdf_reprocessing_keeps_receipt_dates_and_never_downloads(db,monkeypatch):
+    folder=db/'torgi_documents';folder.mkdir()
+    raw=b'%PDF-local';digest=hashlib.sha256(raw).hexdigest();(folder/(digest+'.pdf')).write_bytes(raw)
+    file={'key':'pdf','format':'pdf','state':'read','sha256':digest,'received_at':'source-date','algorithm':'old','tables':[]}
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','files':{'pdf':file},'cards':[]})
+    monkeypatch.setattr(docs,'fetch',lambda *a,**k:pytest.fail('Local reprocessing must not download'))
+    monkeypatch.setattr(docs,'extract_file',lambda *a:{'algorithm':docs.ALGORITHM,'sha256':digest,'egrn_tables':[{'state':'review_required'}]})
+    assert docs.reprocess('trudovoe',{'id':'docs'})=={'processed':1,'remaining':0,'network_requests':0}
+    r=store.get_setting('torgi_documents_trudovoe');f=r['files']['pdf']
+    assert f['received_at']=='source-date' and f['sha256']==digest and f['state']=='read' and not f['geometry_confirmed']
+    assert f['egrn_tables'] and not docs.reprocess_queue(r)
+    with pytest.raises(ValueError):docs.reprocess('trudovoe',{'id':'docs'})
+
+
+def test_changed_local_pdf_rejected_without_using_stale_contour(db,monkeypatch):
+    folder=db/'torgi_documents';folder.mkdir()
+    digest='a'*64;(folder/(digest+'.pdf')).write_bytes(b'changed')
+    file={'key':'pdf','format':'pdf','state':'read','sha256':digest,'received_at':'source-date','algorithm':'old','egrn_tables':[{'outline_xy':[1]}]}
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','files':{'pdf':file}})
+    monkeypatch.setattr(docs,'extract_file',lambda *a:pytest.fail('Changed source cannot be parsed'))
+    docs.reprocess('trudovoe',{'id':'docs'})
+    f=store.get_setting('torgi_documents_trudovoe')['files']['pdf']
+    assert f['state']=='rejected' and f['egrn_tables']==[] and f['received_at']=='source-date'

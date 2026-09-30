@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import zipfile
 from xml.etree import ElementTree as ET
-from . import municipal, schemes
+from . import municipal, schemes, egrn_coordinates
 
 NS='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
@@ -35,8 +35,12 @@ def extract(raw,fmt):
     if fmt=='pdf':
         details,pages=municipal.pdf_text(raw)
         result=schemes.apply_page_limit(schemes.extract(pages),details['processed_pages'],details['unread_pages'])
-        return {**details,'tables':result['tables'],'unparsed_coordinate_pages':result['unparsed_coordinate_pages'],
+        egrn, consumed = egrn_coordinates.extract(pages)
+        unparsed = [n for n,text in pages if any(schemes.PAIR.search(line) and (n,line.strip()) not in consumed
+                    for line in text.splitlines()) and n in result['unparsed_coordinate_pages']]
+        return {**details,'tables':result['tables'],
                 'unreadable_tables':result['unreadable_tables'],'crs_status':result['crs_status'],
+                'egrn_tables':egrn,'unparsed_coordinate_pages':unparsed,
                 'unit':'pdf_page','georeferenced':False},pages
     if fmt!='docx':raise ValueError('Формат не поддержан')
     text,count=docx_text(raw)
@@ -56,7 +60,7 @@ def main():
         if hashlib.sha256(raw).hexdigest()!=digest:raise ValueError('SHA-256 файла изменился')
         result,pages=extract(raw,fmt)
         path.with_suffix('.txt').write_text('\n'.join(f'UNIT {n}\n{text}' for n,text in pages),encoding='utf-8')
-        print(json.dumps({**result,'sha256':digest,'algorithm':'torgi-file-text-v1'},ensure_ascii=False))
+        print(json.dumps({**result,'sha256':digest,'algorithm':'torgi-file-text-v2'},ensure_ascii=False))
     except Exception as exc:
         print(json.dumps({'error':str(exc)[:500]},ensure_ascii=False));raise SystemExit(1)
 

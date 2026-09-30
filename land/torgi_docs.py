@@ -14,7 +14,7 @@ CARD = 'https://torgi.gov.ru/new/api/public/lotcards/'
 FILE = 'https://torgi.gov.ru/new/file-store/v1/'
 BATCH = 5
 MAX_BYTES = 8*1024*1024
-ALGORITHM = 'torgi-file-text-v1'
+ALGORITHM = 'torgi-file-text-v2'
 ROOT = Path(__file__).resolve().parent.parent
 WARNING = 'Файлы извещения могут относиться ко многим лотам. Номер в документе не подтверждает предмет лота, геометрию, действующие условия или доступность земли. Подписи и права не проверены.'
 
@@ -102,6 +102,43 @@ def persist(project,result):
     folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
     (folder/(result['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     store.set_setting('torgi_documents_'+project,result)
+
+
+def reprocess_queue(result):
+    return [f for f in result.get('files',{}).values() if f['state']=='read' and f.get('format')=='pdf'
+            and f.get('algorithm')!=ALGORITHM]
+
+
+def reprocess(project,params):
+    old=store.get_setting('torgi_documents_'+project)
+    search=store.get_setting('torgi_'+project)
+    if not old or params.get('id')!=old['id'] or not search or old['search_id']!=search['id']:
+        raise ValueError('Каталог документов/поиск изменился; обновите страницу')
+    result=copy.deepcopy(old);selected=reprocess_queue(result)[:BATCH]
+    attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0}
+    store.set_setting('torgi_reprocess_attempt_'+project,attempt)
+    try:
+        for file in selected:
+            try:
+                digest=file.get('sha256')
+                if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
+                    raise ValueError('Некорректный SHA-256 сохранённого PDF')
+                path=store.DATA/'torgi_documents'/(digest+'.pdf')
+                if not path.is_file() or path.stat().st_size>MAX_BYTES or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
+                    raise ValueError('Сохранённый PDF отсутствует, слишком велик или изменился')
+                file.update(extract_file(path,digest,'pdf'),reprocessed_at=store.now(),geometry_confirmed=False)
+            except Exception as exc:
+                file.update(state='rejected',error=str(exc)[:500],reprocessed_at=store.now(),tables=[],egrn_tables=[])
+            attempt['processed']+=1;persist(project,result)
+            store.set_setting('torgi_reprocess_attempt_'+project,attempt)
+        persist(project,result)
+        attempt.update(state='done',finished_at=store.now(),remaining=len(reprocess_queue(result)))
+        with store.connect() as db:
+            store.event(db,project,'torgi_reprocess',{'id':result['id'],'files':attempt['processed'],'network_requests':0})
+        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'network_requests':0}
+    except Exception as exc:
+        attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
+    finally:store.set_setting('torgi_reprocess_attempt_'+project,attempt)
 
 
 def metadata(project,params):
