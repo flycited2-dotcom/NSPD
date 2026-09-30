@@ -201,11 +201,13 @@ def test_torgi_local_reprocess_export_queue_and_post_guard(server):
     store.set_setting('torgi_trudovoe',{'id':'search','created_at':'date','lots':[]})
     store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','search_created_at':'date','cards':[],
                       'files':{'key':{'state':'read','format':'pdf','algorithm':'old','received_at':'source-date','eligible':True,
-                                      'egrn_tables':[{'outline_xy':[[1,2]],'geometry_confirmed':False,'georeferenced':False}]}}})
+                                      'egrn_tables':[{'outline_xy':[[1,2]],'geometry_confirmed':False,'georeferenced':False}]},
+                               'docx':{'state':'rejected','format':'docx','eligible':True,'received_at':'docx-source-date',
+                                       'sha256':'a'*64,'error':'Основной XML DOCX превышает лимит'}}})
     store.set_setting('torgi_reprocess_attempt_trudovoe',{'state':'running','network_requests':0})
     with request(server,'/api/torgi/documents/export') as r:
         body=json.load(r)
-        assert body['files_to_reprocess']==1 and body['reprocess_attempt']['state']=='interrupted'
+        assert body['files_to_reprocess']==2 and body['reprocess_attempt']['state']=='interrupted'
         assert body['result']['files']['key']['received_at']=='source-date'
         assert not body['result']['files']['key']['egrn_tables'][0]['georeferenced']
     with pytest.raises(urllib.error.HTTPError) as exc:

@@ -176,7 +176,7 @@ def test_child_timeout_and_wrong_hash(db,monkeypatch):
     def timeout(*a,**kw):raise subprocess.TimeoutExpired('worker',1)
     monkeypatch.setattr(docs.subprocess,'run',timeout)
     with pytest.raises(ValueError,match='время'):docs.extract_file(db/'test.docx','a'*64,'docx')
-    monkeypatch.setattr(docs.subprocess,'run',lambda *a,**kw:type('R',(),{'stdout':json.dumps({'sha256':'wrong','algorithm':docs.ALGORITHM}),'returncode':0})())
+    monkeypatch.setattr(docs.subprocess,'run',lambda *a,**kw:type('R',(),{'stdout':json.dumps({'sha256':'wrong','algorithm':docs.DOCX_ALGORITHM}),'returncode':0})())
     with pytest.raises(ValueError,match='другому'):docs.extract_file(db/'test.docx','a'*64,'docx')
 
 
@@ -203,3 +203,35 @@ def test_changed_local_pdf_rejected_without_using_stale_contour(db,monkeypatch):
     docs.reprocess('trudovoe',{'id':'docs'})
     f=store.get_setting('torgi_documents_trudovoe')['files']['pdf']
     assert f['state']=='rejected' and f['egrn_tables']==[] and f['received_at']=='source-date'
+
+
+def test_saved_large_docx_reprocesses_locally_and_preserves_pdf_and_dates(db,monkeypatch):
+    xml='<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>'
+    xml+='<w:r><w:rPr><w:b/><w:color w:val="123456"/></w:rPr></w:r>'*50000
+    xml+='<w:r><w:t>90:12:172001:956</w:t></w:r></w:p></w:body></w:document>'
+    raw=docx(xml);digest=hashlib.sha256(raw).hexdigest();folder=db/'torgi_documents';folder.mkdir()
+    (folder/(digest+'.docx')).write_bytes(raw)
+    file={'key':'large','format':'docx','eligible':True,'state':'rejected','error':'Основной XML DOCX превышает лимит',
+          'sha256':digest,'received_at':'original-date','associations':[{'lot_id':'same','scope':'notice'}]}
+    pdf={'key':'pdf','format':'pdf','state':'read','algorithm':docs.ALGORITHM,'egrn_tables':[{'points':[1,2]}]}
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','cards':[], 'files':{'large':file,'pdf':pdf}})
+    monkeypatch.setattr(docs,'fetch',lambda *a,**k:pytest.fail('Saved DOCX must not be downloaded'))
+    assert docs.reprocess('trudovoe',{'id':'docs'})=={'processed':1,'remaining':0,'network_requests':0}
+    after=store.get_setting('torgi_documents_trudovoe')
+    f=after['files']['large']
+    assert f['state']=='read' and f['algorithm']==docs.DOCX_ALGORITHM and 'error' not in f
+    assert f['received_at']=='original-date' and f['sha256']==digest and f['associations']==file['associations']
+    assert f['mentions'][0]['cadastral_number']=='90:12:172001:956' and f['body_xml_complete']
+    assert f['tables']==[] and not f['geometry_confirmed'] and not f['text_layer_complete']
+    assert after['files']['pdf']==pdf
+
+
+def test_docx_reprocess_queue_does_not_retry_other_rejections_or_loop(db,monkeypatch):
+    file={'format':'docx','eligible':True,'state':'rejected','error':'Основной XML DOCX превышает лимит','sha256':'a'*64}
+    files={'large':file,'bad':dict(file,error='Некорректный XML DOCX'),'inactive':dict(file,eligible=False),
+           'no_source':dict(file,sha256=None),'already_attempted':dict(file,reprocess_algorithm=docs.DOCX_ALGORITHM)}
+    assert docs.reprocess_queue({'files':files})==[file]
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','files':files})
+    docs.reprocess('trudovoe',{'id':'docs'})
+    after=store.get_setting('torgi_documents_trudovoe')
+    assert after['files']['large']['state']=='rejected' and not docs.reprocess_queue(after)

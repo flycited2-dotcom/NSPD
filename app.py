@@ -262,7 +262,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/torgi/documents/read':
                 return self.send(launch_job(project, 'Чтение вложений ГИС Торги', lambda: torgi_docs.read(project, data)))
             if path == '/api/torgi/documents/reprocess':
-                return self.send(launch_job(project, 'Локальное перечтение PDF торгов', lambda: torgi_docs.reprocess(project, data)))
+                return self.send(launch_job(project, 'Локальное перечтение PDF/DOCX торгов', lambda: torgi_docs.reprocess(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/torgi':

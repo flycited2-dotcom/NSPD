@@ -9,6 +9,7 @@ import sys
 import time
 from . import store, torgi
 from .network import fetch, ResponseTooLarge
+from .docx_text import ALGORITHM as DOCX_ALGORITHM
 
 CARD = 'https://torgi.gov.ru/new/api/public/lotcards/'
 FILE = 'https://torgi.gov.ru/new/file-store/v1/'
@@ -105,8 +106,12 @@ def persist(project,result):
 
 
 def reprocess_queue(result):
-    return [f for f in result.get('files',{}).values() if f['state']=='read' and f.get('format')=='pdf'
-            and f.get('algorithm')!=ALGORITHM]
+    def outdated(file):
+        if file['state']=='read' and file.get('format')=='pdf':return file.get('algorithm')!=ALGORITHM
+        return (file['state']=='rejected' and file.get('format')=='docx' and file.get('eligible')
+                and file.get('error')=='Основной XML DOCX превышает лимит' and file.get('sha256')
+                and file.get('reprocess_algorithm')!=DOCX_ALGORITHM)
+    return [f for f in result.get('files',{}).values() if outdated(f)]
 
 
 def reprocess(project,params):
@@ -119,16 +124,20 @@ def reprocess(project,params):
     store.set_setting('torgi_reprocess_attempt_'+project,attempt)
     try:
         for file in selected:
+            fmt=file['format'];algorithm=DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
             try:
                 digest=file.get('sha256')
                 if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
-                    raise ValueError('Некорректный SHA-256 сохранённого PDF')
-                path=store.DATA/'torgi_documents'/(digest+'.pdf')
+                    raise ValueError('Некорректный SHA-256 сохранённого файла')
+                path=store.DATA/'torgi_documents'/(digest+'.'+fmt)
                 if not path.is_file() or path.stat().st_size>MAX_BYTES or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
-                    raise ValueError('Сохранённый PDF отсутствует, слишком велик или изменился')
-                file.update(extract_file(path,digest,'pdf'),reprocessed_at=store.now(),geometry_confirmed=False)
+                    raise ValueError('Сохранённый файл отсутствует, слишком велик или изменился')
+                file.update(extract_file(path,digest,fmt),state='read',reprocessed_at=store.now(),geometry_confirmed=False,
+                            reprocess_algorithm=algorithm)
+                file.pop('error',None)
             except Exception as exc:
-                file.update(state='rejected',error=str(exc)[:500],reprocessed_at=store.now(),tables=[],egrn_tables=[])
+                file.update(state='rejected',error=str(exc)[:500],reprocessed_at=store.now(),tables=[],egrn_tables=[],
+                            reprocess_algorithm=algorithm)
             attempt['processed']+=1;persist(project,result)
             store.set_setting('torgi_reprocess_attempt_'+project,attempt)
         persist(project,result)
@@ -196,7 +205,8 @@ def extract_file(path,digest,fmt):
     if len(r.stdout)>4*1024*1024:raise ValueError('Результат чтения превышает лимит')
     result=json.loads(r.stdout)
     if r.returncode or result.get('error'):raise ValueError(result.get('error') or 'Ошибка чтения файла')
-    if result.get('sha256')!=digest or result.get('algorithm')!=ALGORITHM:raise ValueError('Чтение относится к другому файлу')
+    algorithm=DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
+    if result.get('sha256')!=digest or result.get('algorithm')!=algorithm:raise ValueError('Чтение относится к другому файлу')
     return result
 
 
