@@ -21,6 +21,7 @@ from land.exports import bundle, dossier
 from land import nspd
 from land import survey
 from land import publications
+from land import torgi
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -107,6 +108,20 @@ class Handler(BaseHTTPRequestHandler):
             if p.path in ('/api/publications', '/api/publications/export'):
                 result = store.get_setting('publications_' + project, None)
                 return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/torgi', '/api/torgi/export'):
+                result = store.get_setting('torgi_' + project, None)
+                attempt = store.get_setting('torgi_attempt_' + project, None)
+                geometry_attempt = store.get_setting('torgi_geometry_attempt_' + project, None)
+                with JOB_LOCK:
+                    active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
+                if not active:
+                    if attempt and attempt['state'] == 'running':
+                        attempt = dict(attempt, state='interrupted')
+                    if geometry_attempt and geometry_attempt['state'] == 'running':
+                        geometry_attempt = dict(geometry_attempt, state='interrupted')
+                return self.send({'result': result, 'attempt': attempt, 'geometry_attempt': geometry_attempt,
+                                  'current_survey_id': (store.get_setting('survey_' + project, {}) or {}).get('id')},
+                                 filename='torgi-observed.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/survey', '/api/survey/export'):
                 result = store.get_setting('survey_' + project, None)
                 attempt = store.get_setting('survey_attempt_' + project, None)
@@ -174,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Пересчёт сохранённой геометрии', lambda: survey.recalculate(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
+            if path == '/api/torgi':
+                return self.send(launch_job(project, 'Поиск лотов ГИС Торги', lambda: torgi.run(project, data)))
+            if path == '/api/torgi/geometry':
+                return self.send(launch_job(project, 'Сопоставление лотов с областью', lambda: torgi.locate(project, data)))
             if path == '/api/survey/watch':
                 with store.LOCK:
                     result = store.get_setting('survey_' + project, {})

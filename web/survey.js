@@ -33,6 +33,7 @@ async function refreshSurvey(){
  L.geoJSON(r.roads||{type:'FeatureCollection',features:[]},{style:{color:'#244c6b',weight:3,fillOpacity:.25},onEachFeature:(f,l)=>l.bindPopup(`${escapeHtml(f.properties.label||f.id)} · дорожное назначение; доступ не проверен`)}).addTo(sdraw);
  L.geoJSON(r.gaps,{style:{color:'#c7831d',weight:2,fillOpacity:.35},onEachFeature:(f,l)=>l.bindPopup(`${escapeHtml(f.properties.label)} · ${areaFmt(f.properties.area_m2)} м²<br>Предварительный, права не проверены`)}).addTo(sdraw);
  const [w,south,e,n]=r.bounds;L.rectangle([[south,w],[n,e]],{color:'#333',weight:1,fill:false,dashArray:'5 5'}).addTo(sdraw);smap.fitBounds([[south,w],[n,e]],{padding:[16,16]});
+ if(typeof refreshTorgi==='function')await refreshTorgi();
 }
 async function runSurvey(recalculate=false){
  if(running)return;running=true;stopSelection();document.querySelectorAll('button').forEach(b=>b.disabled=true);

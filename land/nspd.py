@@ -30,6 +30,12 @@ LAST_REQUEST = 0.0
 WARNING = 'Полнота пространственного покрытия не подтверждена. Пустой ответ не доказывает отсутствие прав. Объекты требуют проверки.'
 
 
+class StatusError(ValueError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f'НСПД: HTTP {status_code}. Автоматические повторы не выполняются.')
+
+
 def catalog():
     data = json.loads((CAPTURE / 'layers-catalog.json').read_text(encoding='utf-8'))
     return {key: next(x for x in data['layers'] if x['title'].strip() == title) for key, title in TITLES.items()}
@@ -51,7 +57,7 @@ def request_json(url, body=None):
                               headers={'Accept': 'application/json', 'User-Agent': 'LandRecon/1.0'}) as client:
                 with client.stream('POST' if body is not None else 'GET', url, json=body) as r:
                     if r.status_code != 200:
-                        raise ValueError(f'НСПД: HTTP {r.status_code}. Автоматические повторы не выполняются.')
+                        raise StatusError(r.status_code)
                     chunks, size = [], 0
                     for chunk in r.iter_bytes():
                         size += len(chunk)
