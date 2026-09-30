@@ -196,16 +196,25 @@ def locate(project, params):
         raise ValueError('Поиск изменился; обновите страницу')
     if not survey:
         raise ValueError('Сначала выполните обследование области')
+    retry = params.get('retry_missing', False)
+    if not isinstance(retry, bool):
+        raise ValueError('Параметр повтора должен быть логическим')
     result = copy.deepcopy(previous)
     observations = survey_geometries(survey)
     # Preserve prior remote lookups, but re-relate them to the current survey.
-    observations.update({k:v for k,v in previous.get('geometries', {}).items() if v.get('lookup') and v.get('state') != 'error'})
-    numbers = sorted({n for lot in result['lots'] for n in lot['cadastral_numbers'] if n not in observations})
-    attempt = {'state': 'running', 'started_at': store.now(), 'processed': 0, 'requested': min(len(numbers), MAX_GEOMETRIES)}
+    observations.update({k:v for k,v in previous.get('geometries', {}).items() if v.get('lookup')})
+    retry_states = {'not_returned', 'not_found', 'rejected'}
+    numbers = sorted({n for lot in result['lots'] for n in lot['cadastral_numbers']
+                      if n not in observations or observations[n].get('state') == 'error'
+                      or (retry and observations[n].get('state') in retry_states)})
+    checked = set()
+    attempt = {'state': 'running', 'started_at': store.now(), 'processed': 0,
+               'requested': min(len(numbers), MAX_GEOMETRIES), 'retry_missing': retry}
     store.set_setting('torgi_geometry_attempt_' + project, attempt)
     try:
         for number in numbers[:MAX_GEOMETRIES]:
             url = nspd.BASE + '/api/geoportal/v2/search/geoportal?' + urlencode({'thematicSearchId': 1, 'query': number})
+            checked.add(number)
             try:
                 data, digest = nspd.request_json(url)
                 try:
@@ -234,7 +243,7 @@ def locate(project, params):
             store.set_setting('torgi_geometry_attempt_' + project, attempt)
         result.update(parent_id=previous['id'], geometry_checked_at=store.now(), survey_id=survey['id'], survey_bounds=survey['bounds'],
                       geometries=observations, lots=relate(result['lots'], observations, survey), geometry_limit=MAX_GEOMETRIES,
-                      geometry_unchecked_numbers=[n for n in numbers if n not in observations])
+                      geometry_unchecked_numbers=[n for n in numbers if n not in checked])
         persist(project, result)
         if attempt['state'] == 'running':
             attempt['state'] = 'done'

@@ -166,3 +166,47 @@ def test_geometry_limit_continues_without_refetching_previous(db,monkeypatch):
     assert not r['geometry_unchecked_numbers'] and len(calls)==2
     assert r['geometries']['90:12:172301:1']['received_at']==date
     assert r['created_at']=='source-date' and all(l['in_survey'] for l in r['lots'])
+
+
+def test_explicit_retry_missing_preserves_received_dates(db,monkeypatch):
+    s=pilot();store.set_setting('survey_trudovoe',s)
+    states=['received','not_returned','rejected','not_found']
+    numbers=[f'90:12:172301:{i}' for i in range(1,5)]
+    rows=[torgi.normalize(lot(f'21000000000000000001_{i}',cad=n)) for i,n in enumerate(numbers,1)]
+    observations={n:{'state':state,'lookup':True,'received_at':'original-date','features':[]}
+                  for n,state in zip(numbers,states)}
+    store.set_setting('torgi_trudovoe',{'id':'old','lots':rows,'created_at':'search-date','geometries':observations})
+    calls=[]
+    def fetch(url):
+        calls.append(url);return {},'new-hash'
+    monkeypatch.setattr(torgi.nspd,'request_json',fetch)
+    monkeypatch.setattr(torgi.nspd,'normalize',lambda data:{'features':[]})
+    torgi.locate('trudovoe',{'id':'old'})
+    r=store.get_setting('torgi_trudovoe')
+    assert not calls
+    with pytest.raises(ValueError,match='логическим'):
+        torgi.locate('trudovoe',{'id':r['id'],'retry_missing':'true'})
+    torgi.locate('trudovoe',{'id':r['id'],'retry_missing':True})
+    r=store.get_setting('torgi_trudovoe')
+    assert len(calls)==3 and all(n not in calls[0] for n in numbers[:1])
+    assert r['geometries'][numbers[0]]==observations[numbers[0]]
+    assert r['created_at']=='search-date' and not r['geometry_unchecked_numbers']
+    assert all(r['geometries'][n]['received_at']!='original-date' for n in numbers[1:])
+
+
+def test_retry_access_failure_keeps_unattempted_observations(db,monkeypatch):
+    store.set_setting('survey_trudovoe',pilot())
+    numbers=[f'90:12:172301:{i}' for i in range(1,4)]
+    rows=[torgi.normalize(lot(f'21000000000000000001_{i}',cad=n)) for i,n in enumerate(numbers,1)]
+    observations={n:{'state':'not_returned','lookup':True,'received_at':'old-date','features':[],'http_status':404} for n in numbers}
+    store.set_setting('torgi_trudovoe',{'id':'old','lots':rows,'geometries':observations})
+    calls=[]
+    def fetch(url):
+        calls.append(url);raise torgi.nspd.StatusError(403)
+    monkeypatch.setattr(torgi.nspd,'request_json',fetch)
+    torgi.locate('trudovoe',{'id':'old','retry_missing':True})
+    r=store.get_setting('torgi_trudovoe')
+    assert len(calls)==1 and r['geometries'][numbers[0]]['state']=='error'
+    assert r['geometry_unchecked_numbers']==numbers[1:]
+    assert all(r['geometries'][n]==observations[n] for n in numbers[1:])
+    assert store.get_setting('torgi_geometry_attempt_trudovoe')['state']=='partial'

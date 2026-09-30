@@ -92,7 +92,8 @@ def file_queue(result,retry=False):
         if f.get('type_code')=='Basis_for_sale' or any(a['scope']=='lot' for a in f['associations']):return 1
         if f.get('type_code') in ('Application_Form','Draft_Contract') or any(x in name for x in ('квитанц','задат','договор','заявк')):return 3
         return 2
-    return sorted((f for f in result.get('files',{}).values() if f.get('eligible') and (f['state']=='pending' or (retry and f['state']=='error'))),key=priority)
+    return sorted((f for f in result.get('files',{}).values() if f.get('eligible') and (f['state']=='pending' or (retry and f['state']=='error'))),
+                  key=lambda f: (0 if retry and f['state']=='error' else 1, priority(f)))
 
 
 def persist(project,result):

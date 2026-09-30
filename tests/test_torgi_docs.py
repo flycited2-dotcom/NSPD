@@ -69,6 +69,16 @@ def test_scheme_and_notice_read_before_payment_and_contract_templates():
     assert {f['file_name'] for f in queue[:2]}=={'Схема земельного участка.pdf','notice.docx'}
 
 
+def test_explicit_retry_prioritizes_transport_errors_only():
+    attachments=[attachment(fileId=letter*24,fileName=name) for letter,name in
+                 [('a','Схема.pdf'),('c','Квитанция.docx'),('d','notice.docx'),('e','scan.pdf')]]
+    files=docs.files_for([docs.normalize_card(card(noticeAttachments=attachments),lot())],{})
+    for file in files.values():
+        file['state']={'a':'pending','c':'error','d':'read','e':'rejected'}[file['file_id'][0]]
+    assert [f['file_id'][0] for f in docs.file_queue({'files':files})]==['a']
+    assert [f['file_id'][0] for f in docs.file_queue({'files':files},True)]==['c','a']
+
+
 def test_conflicting_inactive_unsupported_and_large_files_excluded():
     c1=docs.normalize_card(card(noticeAttachments=[attachment(),attachment(fileId='c'*24,fileName='scan.jpg'),
                                                   attachment(fileId='d'*24,fileSize=9*1024*1024),

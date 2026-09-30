@@ -31,7 +31,7 @@ async function refreshTorgi(){
 async function runTorgi(geometry=false){
  if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
  el('torgi-status').textContent=geometry?'Проверка геометрии по кадастровым номерам в НСПД…':'Загрузка страниц ГИС Торги…';
- try{const job=await api(geometry?'/api/torgi/geometry':'/api/torgi',geometry?{id:currentTorgi?.id}:{query:el('torgi-query').value,history:el('torgi-history').checked});let s;
+ try{const job=await api(geometry?'/api/torgi/geometry':'/api/torgi',geometry?{id:currentTorgi?.id,retry_missing:el('torgi-retry').checked}:{query:el('torgi-query').value,history:el('torgi-history').checked});let s;
  do{await new Promise(r=>setTimeout(r,1000));s=await api('/api/jobs/'+job.job_id);await refreshTorgi()}while(s.state==='running');
  if(s.state==='error')throw Error(s.error);
  }catch(e){el('torgi-status').textContent+='\nНе выполнено: '+e.message}
