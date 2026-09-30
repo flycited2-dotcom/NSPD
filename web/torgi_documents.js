@@ -1,0 +1,26 @@
+let currentTorgiDocs=null;
+const docErrorText=x=>/timed out|Timeout/i.test(String(x||''))?'Источник не завершил загрузку за отведённое время. Полученные файлы сохранены; очередь можно продолжить отдельно.':String(x||'');
+const fileState={pending:'В очереди',read:'Файл обработан',unsupported:'Формат не читается автоматически',inactive:'Неактивное вложение',oversized:'Превышает 8 МБ',rejected:'Чтение отклонено',error:'Ошибка загрузки'};
+async function refreshTorgiDocs(){
+ const {result:r,attempt:a,reading_attempt:b,current_search_id:s,cards_remaining:c,files_remaining:f}=await api('/api/torgi/documents');currentTorgiDocs=r;
+ if(!r){el('torgi-doc-status').textContent='Карточки вложений ещё не загружены. В текущем поиске осталось карточек: '+c;return;}
+ const files=Object.values(r.files||{}),stale=r.search_id!==s;
+ el('torgi-doc-status').textContent=`Карточек получено: ${r.cards.filter(x=>x.state==='received').length}; ошибок карточек: ${r.cards.filter(x=>x.state==='error').length}; файлов: ${files.length}; обработано: ${files.filter(x=>x.state==='read').length}; ошибок/отклонений файлов: ${files.filter(x=>x.state==='error'||x.state==='rejected').length}; карточек в очереди: ${c}; файлов в очереди: ${f}.\n${r.warning}${stale?'\nПоиск изменился; загрузите карточки для актуализации.':''}${a?.state==='running'?'\nКарточки: '+a.processed+' / '+a.requested:''}${b?.state==='running'?'\nФайлы: '+b.processed+' / '+b.requested:''}${a?.error?'\nПопытка карточек: '+docErrorText(a.error):''}${b?.error?'\nПопытка чтения: '+docErrorText(b.error):''}${a?.state==='interrupted'||b?.state==='interrupted'?'\nПоследняя попытка прервана.':''}`;
+ el('torgi-doc-export').classList.remove('hidden');
+ el('torgi-doc-results').innerHTML=r.cards.map(card=>`<details><summary>Лот ${escapeHtml(card.lot_id)} · ${card.state==='received'?'вложений: '+card.attachments.length:'ошибка карточки'}</summary>${card.state==='error'?'<p>'+escapeHtml(docErrorText(card.error))+'</p>':`<p><a href="${escapeHtml(card.lot_url)}" target="_blank" rel="noopener noreferrer">Официальная карточка</a> · получена ${escapeHtml(card.received_at)}<br>Статус карточки: ${escapeHtml(statusName(card.card_status))}. Это дата проверки карточки, а не дата актуальности файла.</p>${card.attachments.map(x=>{
+ const file=r.files[x.key];return `<details><summary>${escapeHtml(x.file_name)} · ${x.scope==='notice'?'извещение, общий файл':'вложение лота'} · ${fileState[file.state]||escapeHtml(file.state)}</summary><p><a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer">Официальный файл</a><br>Тип источника: ${escapeHtml(x.type_name||'не указан')} · размер карточки: ${x.declared_size} байт<br>Загружен в источник: ${escapeHtml(x.source_upload_date||'не указано')}${x.inactive?' · отмечен неактивным':''}<br>Файл связан с лотами: ${escapeHtml(file.associations.map(a=>a.lot_id+' ('+(a.scope==='notice'?'извещение':'лот')+')').join('; '))}</p>${file.metadata_conflict?'<p><b>Для одного fileId получены разные метаданные; автоматическое чтение остановлено.</b></p>':''}${file.error?'<p>'+escapeHtml(docErrorText(file.error))+'</p>':''}${file.received_at?'<p>Скачан: '+escapeHtml(file.received_at)+'<br>Локальный SHA-256: '+escapeHtml(file.sha256)+'</p>':''}<p>Алгоритм хеша карточки не указан; он не объявляется локальным SHA-256. Электронная подпись не проверена.</p>${file.state==='read'?`<p>${file.unit==='pdf_page'?'PDF: '+file.processed_pages+' из '+file.total_pages+' страниц; без достаточного текста: '+escapeHtml((file.image_or_sparse_pages||[]).join(', ')||'нет отмеченных'):'Основной текст DOCX, абзацев: '+file.paragraph_count+'. Страницы и изображения не восстановлены.'}</p><details><summary>Кадастровые упоминания: ${file.mentions?.length||0}</summary><p>${(file.mentions||[]).map(m=>escapeHtml(m.cadastral_number)+(file.unit==='pdf_page'?' · стр. '+escapeHtml(m.pages.join(', ')):' · основной текст DOCX')).join('<br>')||'Не найдены; отсутствие номеров этим не установлено.'}</p></details><p>Таблиц поддержанного формата: ${file.tables?.length||0}. Геопривязки нет; номер из общего извещения не назначается этому лоту автоматически.</p>`:''}</details>`;
+ }).join('')}`}</details>`).join('')||'<p>Карточек нет. Отсутствие документов этим не установлено.</p>';
+}
+async function runTorgiDocs(read=false){
+ if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+ try{
+  const args={retry_errors:el('torgi-doc-retry').checked};
+  if(read)args.id=currentTorgiDocs?.id;else args.search_id=(await api('/api/torgi')).result?.id;
+  const j=await api(read?'/api/torgi/documents/read':'/api/torgi/documents',args);let s;
+  do{await new Promise(r=>setTimeout(r,1000));s=await api('/api/jobs/'+j.job_id);await refreshTorgiDocs()}while(s.state==='running');
+  if(s.state==='error')throw Error(s.error);
+ }catch(e){el('torgi-doc-status').textContent+='\nНе завершено: '+e.message}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
+}
+el('torgi-doc-cards').addEventListener('click',()=>runTorgiDocs());el('torgi-doc-read').addEventListener('click',()=>runTorgiDocs(true));
+refreshTorgiDocs().catch(e=>el('torgi-doc-status').textContent=e.message);

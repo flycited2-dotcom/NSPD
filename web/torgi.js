@@ -26,6 +26,7 @@ async function refreshTorgi(){
   L.geoJSON(currentSurvey.gaps,{style:{color:'#c7831d',weight:1,fillOpacity:.15}}).addTo(tdraw);
  }
  if(!torgiStale)for(const lot of r.lots)for(const m of lot.spatial_matches||[])L.geoJSON(m.feature,{style:{color:'#8e3f92',weight:3,fillOpacity:.2},onEachFeature:(f,l)=>l.bindPopup(`${escapeHtml(m.cadastral_number)}<br>${escapeHtml(lot.procedure.name)} · ${escapeHtml(statusName(lot.status))}<br><a href="${escapeHtml(lot.url)}" target="_blank" rel="noopener noreferrer">Официальный лот</a>`)}).addTo(tdraw);
+ if(typeof refreshTorgiDocs==='function')await refreshTorgiDocs();
 }
 async function runTorgi(geometry=false){
  if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);

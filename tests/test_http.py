@@ -171,3 +171,24 @@ def test_schemes_export_is_local_coordinates_and_marks_stale_interrupted(server)
         assert not t['georeferenced'] and not t['geometry_confirmed']
         assert 'coordinates' not in t and 'outline_xy' in t
     assert store.candidates('trudovoe')==[]
+
+
+def test_torgi_documents_export_preserves_scope_and_interruption(server):
+    store.set_setting('torgi_trudovoe',{'id':'current','created_at':'new-date','lots':[{'id':'lot'}]})
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'old','search_created_at':'old-date','cards':[],
+                      'files':{'key':{'state':'read','eligible':True,'associations':[{'scope':'notice','lot_id':'lot'}],
+                                      'sha256':'local','source_hash':'declared','source_hash_algorithm':'not_specified','geometry_confirmed':False}}})
+    store.set_setting('torgi_documents_attempt_trudovoe',{'state':'running'})
+    store.set_setting('torgi_files_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/torgi/documents/export') as r:
+        body=json.load(r)
+        assert 'torgi-documents.json' in r.headers['Content-Disposition']
+        assert body['attempt']['state']==body['reading_attempt']['state']=='interrupted'
+        assert body['cards_remaining']==1 and body['files_remaining']==0
+        assert body['current_search_id']=='current'
+        f=body['result']['files']['key']
+        assert f['associations'][0]['scope']=='notice' and not f['geometry_confirmed']
+        assert f['sha256']!=f['source_hash']
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server,'/api/torgi/documents/read',{'id':'docs'},token=False)
+    assert exc.value.code==403

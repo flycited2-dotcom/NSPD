@@ -1,0 +1,205 @@
+"""Observed public lot cards and files, with notice/lot evidence kept separate."""
+import copy
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from . import store, torgi
+from .network import fetch, ResponseTooLarge
+
+CARD = 'https://torgi.gov.ru/new/api/public/lotcards/'
+FILE = 'https://torgi.gov.ru/new/file-store/v1/'
+BATCH = 5
+MAX_BYTES = 8*1024*1024
+ALGORITHM = 'torgi-file-text-v1'
+ROOT = Path(__file__).resolve().parent.parent
+WARNING = 'Файлы извещения могут относиться ко многим лотам. Номер в документе не подтверждает предмет лота, геометрию, действующие условия или доступность земли. Подписи и права не проверены.'
+
+
+def descriptor(row, scope):
+    if not isinstance(row,dict) or not re.fullmatch(r'[0-9a-f]{24}',str(row.get('fileId',''))):
+        raise ValueError('Неожиданный идентификатор файла')
+    name=row.get('fileName');size=row.get('fileSize')
+    if not isinstance(name,str) or not 1<=len(name)<=500 or any(ord(c)<32 for c in name):
+        raise ValueError('Некорректное имя файла')
+    if isinstance(size,bool) or not isinstance(size,int) or not 0<size<=1024*1024*1024:
+        raise ValueError('Неожиданный размер файла')
+    digest=row.get('hash')
+    if digest is not None and (not isinstance(digest,str) or not re.fullmatch(r'[0-9a-fA-F]{64}',digest)):
+        raise ValueError('Неожиданный хеш источника')
+    inactive=row.get('inactive',False)
+    if not isinstance(inactive,bool):raise ValueError('Неожиданный статус вложения')
+    ext=Path(name).suffix.lower().lstrip('.')
+    identity={'file_id':row['fileId'],'file_name':name,'declared_size':size,'source_hash':digest}
+    key=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:24]
+    return {**identity,'key':key,'scope':scope,'format':ext,'url':FILE+row['fileId'],
+            'source_hash_algorithm':'not_specified','source_upload_date':row.get('uploadDate'),
+            'inactive':inactive,'type_code':str(row.get('attachmentTypeCode') or '')[:100],
+            'type_name':str(row.get('attachmentTypeName') or '')[:500],
+            'source_check_result':str(row.get('checkResult') or '')[:100]}
+
+
+def normalize_card(data, lot):
+    if not isinstance(data,dict) or data.get('id')!=lot['id'] or str(data.get('subjectRFCode'))!='91' or data.get('noticeNumber')!=lot['notice_number']:
+        raise ValueError('Карточка не соответствует лоту/извещению/региону')
+    attachments=[]
+    for field,scope in [('lotAttachments','lot'),('noticeAttachments','notice')]:
+        rows=data.get(field) or []
+        if not isinstance(rows,list) or len(rows)>100:raise ValueError('Неожиданная структура вложений')
+        seen=set()
+        for row in rows:
+            item=descriptor(row,scope)
+            if item['key'] in seen:raise ValueError('Повтор файла внутри группы вложений')
+            seen.add(item['key']);attachments.append(item)
+    return {'lot_id':lot['id'],'notice_number':lot['notice_number'],'lot_url':lot['url'],
+            'state':'received','card_status':str(data.get('lotStatus') or '')[:100],
+            'attachments':attachments,'geometry_confirmed':False}
+
+
+def files_for(cards, prior):
+    files={};versions={}
+    for card in cards:
+        for attachment in card.get('attachments',[]):
+            key=attachment['key']
+            versions.setdefault(attachment['file_id'],set()).add(key)
+            if key not in files:
+                old=copy.deepcopy(prior.get(key) or {})
+                initial='inactive' if attachment['inactive'] else 'oversized' if attachment['declared_size']>MAX_BYTES else 'pending' if attachment['format'] in ('pdf','docx') else 'unsupported'
+                files[key]={**old,**attachment,'associations':[]}
+                files[key].setdefault('state',initial)
+            f=files[key]
+            f['associations'].append({'lot_id':card['lot_id'],'notice_number':card['notice_number'],'scope':attachment['scope'],'inactive':attachment['inactive']})
+    for file in files.values():
+        file['metadata_conflict']=len(versions[file['file_id']])>1
+        file['eligible']=not file['metadata_conflict'] and any(not a['inactive'] for a in file['associations'])
+        if file['state']=='inactive' and file['eligible']:
+            file['state']='oversized' if file['declared_size']>MAX_BYTES else 'pending' if file['format'] in ('pdf','docx') else 'unsupported'
+    return files
+
+
+def metadata_queue(search,result,retry=False):
+    prior={c['lot_id']:c for c in result.get('cards',[])}
+    return [lot for lot in search['lots'] if lot['id'] not in prior or (retry and prior[lot['id']]['state']=='error')]
+
+
+def file_queue(result,retry=False):
+    def priority(f):
+        name=f['file_name'].lower()
+        if f.get('type_code')=='Notice_Document' or any(x in name for x in ('схем','кадастр','межеван','егрн')):return 0
+        if f.get('type_code')=='Basis_for_sale' or any(a['scope']=='lot' for a in f['associations']):return 1
+        if f.get('type_code') in ('Application_Form','Draft_Contract') or any(x in name for x in ('квитанц','задат','договор','заявк')):return 3
+        return 2
+    return sorted((f for f in result.get('files',{}).values() if f.get('eligible') and (f['state']=='pending' or (retry and f['state']=='error'))),key=priority)
+
+
+def persist(project,result):
+    result['updated_at']=store.now()
+    result['id']=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()[:20]
+    folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
+    (folder/(result['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+    store.set_setting('torgi_documents_'+project,result)
+
+
+def metadata(project,params):
+    search=store.get_setting('torgi_'+project)
+    if not search or params.get('search_id')!=search['id']:raise ValueError('Поиск изменился; обновите страницу')
+    retry=params.get('retry_errors',False)
+    if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
+    old=store.get_setting('torgi_documents_'+project,{}) or {}
+    result=copy.deepcopy(old)
+    # A new actual search requires fresh cards; geometry-only updates retain dated cards.
+    same=result.get('search_created_at')==search['created_at']
+    known={lot['id'] for lot in search['lots']}
+    result.update(search_id=search['id'],search_created_at=search['created_at'],warning=WARNING,
+                  cards=[c for c in old.get('cards',[]) if same and c['lot_id'] in known],geometry_confirmed=False)
+    selected=metadata_queue(search,result,retry)[:BATCH]
+    attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected)}
+    store.set_setting('torgi_documents_attempt_'+project,attempt)
+    try:
+        for lot in selected:
+            url=CARD+lot['id'];attempt['lot_id']=lot['id']
+            store.set_setting('torgi_documents_attempt_'+project,attempt)
+            try:
+                raw,ct,code=fetch(url,max_bytes=2*1024*1024)
+            except Exception as exc:
+                result['cards']=[c for c in result['cards'] if c['lot_id']!=lot['id']]+[{'lot_id':lot['id'],'state':'error','error':str(exc)[:500],'checked_at':store.now()}]
+                attempt.update(state='partial',error=str(exc)[:500]);break
+            digest=hashlib.sha256(raw).hexdigest()
+            try:
+                card=normalize_card(json.loads(raw),lot)
+                card.update(source=url,received_at=store.now(),sha256=digest,http_status=code)
+            except (ValueError,TypeError,KeyError) as exc:
+                card={'lot_id':lot['id'],'state':'error','error':str(exc)[:500],'checked_at':store.now(),'source':url,'sha256':digest}
+            # Only normalized fields are persisted; raw account/payment/owner fields are excluded.
+            result['cards']=[c for c in result['cards'] if c['lot_id']!=lot['id']]+[card]
+            result['files']=files_for(result['cards'],old.get('files',{}))
+            attempt['processed']+=1;persist(project,result)
+            store.set_setting('torgi_documents_attempt_'+project,attempt);time.sleep(2)
+        result['files']=files_for(result['cards'],old.get('files',{}))
+        persist(project,result)
+        if attempt['state']=='running':attempt['state']='done'
+        attempt.update(finished_at=store.now(),remaining=len(metadata_queue(search,result)))
+        with store.connect() as db:store.event(db,project,'torgi_document_cards',{'id':result['id'],'cards':attempt['processed'],'state':attempt['state']})
+        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'state':attempt['state']}
+    except Exception as exc:
+        attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
+    finally:store.set_setting('torgi_documents_attempt_'+project,attempt)
+
+
+def extract_file(path,digest,fmt):
+    options={'creationflags':subprocess.CREATE_NO_WINDOW} if sys.platform=='win32' else {}
+    try:
+        r=subprocess.run([sys.executable,'-m','land.torgi_file_worker',str(path.resolve()),digest,fmt],cwd=ROOT,
+                         capture_output=True,encoding='utf-8',timeout=60,**options)
+    except subprocess.TimeoutExpired as exc:raise ValueError('Чтение файла превысило время; процесс остановлен') from exc
+    if len(r.stdout)>4*1024*1024:raise ValueError('Результат чтения превышает лимит')
+    result=json.loads(r.stdout)
+    if r.returncode or result.get('error'):raise ValueError(result.get('error') or 'Ошибка чтения файла')
+    if result.get('sha256')!=digest or result.get('algorithm')!=ALGORITHM:raise ValueError('Чтение относится к другому файлу')
+    return result
+
+
+def read(project,params):
+    old=store.get_setting('torgi_documents_'+project)
+    search=store.get_setting('torgi_'+project)
+    if not old or params.get('id')!=old['id'] or not search or old['search_id']!=search['id']:
+        raise ValueError('Каталог документов/поиск изменился; сначала загрузите карточки')
+    retry=params.get('retry_errors',False)
+    if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
+    result=copy.deepcopy(old);selected=file_queue(result,retry)[:BATCH]
+    attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected)}
+    store.set_setting('torgi_files_attempt_'+project,attempt)
+    folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
+    try:
+        for file in selected:
+            attempt['file_key']=file['key'];store.set_setting('torgi_files_attempt_'+project,attempt)
+            try:
+                raw,ct,code=fetch(FILE+file['file_id'],max_bytes=MAX_BYTES)
+            except ResponseTooLarge as exc:
+                file.update(state='rejected',error=str(exc)[:500],checked_at=store.now())
+                attempt['processed']+=1;persist(project,result);continue
+            except Exception as exc:
+                file.update(state='error',error=str(exc)[:500],checked_at=store.now())
+                attempt.update(state='partial',error=str(exc)[:500]);break
+            digest=hashlib.sha256(raw).hexdigest();path=folder/(digest+'.'+file['format'])
+            file.update(received_at=store.now(),sha256=digest,http_status=code,content_type=ct,actual_size=len(raw))
+            try:
+                if len(raw)!=file['declared_size']:raise ValueError('Размер скачанного файла отличается от карточки')
+                if not raw.startswith(b'%PDF-' if file['format']=='pdf' else b'PK\x03\x04'):raise ValueError('Содержимое не соответствует формату PDF/DOCX')
+                path.write_bytes(raw)
+                file.update(extract_file(path,digest,file['format']),state='read',geometry_confirmed=False)
+                file.pop('error',None)
+            except Exception as exc:file.update(state='rejected',error=str(exc)[:500])
+            attempt['processed']+=1;persist(project,result)
+            store.set_setting('torgi_files_attempt_'+project,attempt);time.sleep(2)
+        persist(project,result)
+        if attempt['state']=='running':attempt['state']='done'
+        attempt.update(finished_at=store.now(),remaining=len(file_queue(result)))
+        with store.connect() as db:store.event(db,project,'torgi_files',{'id':result['id'],'files':attempt['processed'],'state':attempt['state']})
+        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'state':attempt['state']}
+    except Exception as exc:
+        attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
+    finally:store.set_setting('torgi_files_attempt_'+project,attempt)

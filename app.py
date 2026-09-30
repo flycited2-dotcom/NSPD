@@ -25,6 +25,7 @@ from land import torgi
 from land import municipal
 from land import ocr
 from land import schemes
+from land import torgi_docs
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -122,6 +123,20 @@ class Handler(BaseHTTPRequestHandler):
                 remaining = len(schemes.pending(catalog, result or {})) if catalog else 0
                 return self.send({'result':result, 'attempt':attempt, 'current_catalog_id':catalog.get('id'), 'remaining':remaining},
                                  filename='scheme-coordinates.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/torgi/documents', '/api/torgi/documents/export'):
+                result = store.get_setting('torgi_documents_' + project, None)
+                attempt = store.get_setting('torgi_documents_attempt_' + project, None)
+                reading = store.get_setting('torgi_files_attempt_' + project, None)
+                search = store.get_setting('torgi_' + project, None)
+                with JOB_LOCK:
+                    active = any(j['state']=='running' and j['project']==project for j in JOBS.values())
+                if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
+                if reading and reading['state']=='running' and not active:reading=dict(reading,state='interrupted')
+                same = result and search and result.get('search_created_at')==search['created_at']
+                return self.send({'result':result,'attempt':attempt,'reading_attempt':reading,'current_search_id':(search or {}).get('id'),
+                                  'cards_remaining':len(torgi_docs.metadata_queue(search,result if same else {})) if search else 0,
+                                  'files_remaining':len(torgi_docs.file_queue(result or {}))},
+                                 filename='torgi-documents.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/municipal', '/api/municipal/export'):
                 result = store.get_setting('municipal_' + project, None)
                 attempt = store.get_setting('municipal_attempt_' + project, None)
@@ -225,6 +240,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Локальное распознавание сканов', lambda: ocr.run(project, data)))
             if path == '/api/schemes':
                 return self.send(launch_job(project, 'Извлечение таблиц координат', lambda: schemes.run(project, data)))
+            if path == '/api/torgi/documents':
+                return self.send(launch_job(project, 'Карточки и вложения ГИС Торги', lambda: torgi_docs.metadata(project, data)))
+            if path == '/api/torgi/documents/read':
+                return self.send(launch_job(project, 'Чтение вложений ГИС Торги', lambda: torgi_docs.read(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/torgi':
