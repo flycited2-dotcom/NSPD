@@ -170,6 +170,9 @@ def test_schemes_export_is_local_coordinates_and_marks_stale_interrupted(server)
         t=body['result']['documents'][0]['tables'][0]
         assert not t['georeferenced'] and not t['geometry_confirmed']
         assert 'coordinates' not in t and 'outline_xy' in t
+        review=body['result']['documents'][0]['review']
+        assert review['accepted_count']==1 and not review['geometry_confirmed']
+        assert 'union_rings_xy' in review and 'geojson' not in review
     assert store.candidates('trudovoe')==[]
 
 

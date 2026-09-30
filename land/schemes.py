@@ -8,9 +8,9 @@ import subprocess
 import sys
 from shapely.geometry import Polygon
 from shapely.validation import explain_validity
-from . import municipal, store
+from . import municipal, store, scheme_review
 
-ALGORITHM = 'designation-xy-v1'
+ALGORITHM = 'designation-xy-v2'
 BATCH = 5
 ROOT = Path(__file__).resolve().parent.parent
 DESIGNATION = re.compile(r'Обозначение земельного\s+участка\s+(:ЗУ\d+|\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10}(?:\(\d+\))?)', re.I)
@@ -110,7 +110,8 @@ def extract(pages):
     names = {re.sub(r'[\s-]+', '', x['label']).upper() for x in crs}
     return {'algorithm': ALGORITHM, 'tables': tables, 'unparsed_coordinate_pages': sorted(unparsed), 'unreadable_tables':issues,
             'crs_mentions': crs, 'crs_status': 'ambiguous_labels' if len(names)>1 else 'parameters_missing' if names else 'label_missing',
-            'georeferenced': False, 'geometry_confirmed': False, 'warning': WARNING}
+            'georeferenced': False, 'geometry_confirmed': False, 'warning': WARNING,
+            'review': scheme_review.build(tables, scheme_review.context(pages))}
 
 
 def apply_page_limit(result, processed_pages, unread_pages):
@@ -119,6 +120,8 @@ def apply_page_limit(result, processed_pages, unread_pages):
             if table['closure'] != 'explicit' and table['pages'][-1] == processed_pages:
                 table['issues'].append({'reason':'Таблица достигает лимита страниц; продолжение не прочитано'})
                 table.update(state='rejected', outline_xy=None, local_area_m2=None)
+    result['review'] = scheme_review.build(result['tables'], {
+        key:result['review'][key] for key in ('origin_statements','division_statements','quarter_statements')})
     return result
 
 
