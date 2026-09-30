@@ -7,7 +7,8 @@ from shapely.ops import unary_union
 from . import store, nspd
 from .geometry import convert, polygons
 
-WARNING = 'Предварительный промежуток между полученными контурами, не подтверждённый свободный участок. Полнота кадастра, права, дороги, застройка, ПЗЗ и ЗОУИТ не проверены.'
+WARNING = 'Предварительный контур, не подтверждённый свободный участок. Полнота источников, права, дороги и допустимость использования не подтверждены. Полученные здания исключены; пересечения с зонами требуют проверки документов.'
+MODES = ('parcels', 'free', 'auction', 'buildings', 'pzz', 'restrictions')
 
 
 def parameters(params):
@@ -28,11 +29,13 @@ def gaps(bounds, layers, params):
     project = lambda g: convert(g, 4326, metric)
     b = project(boundary)
     occupied_world = unary_union([shape(f['geometry']) for f in layers['parcels']['geojson']['features']])
+    buildings_world = unary_union([shape(f['geometry']) for f in layers.get('buildings', {}).get('geojson', {}).get('features', [])])
+    before_buildings = boundary.difference(occupied_world)
     # Preserve the input topology at the boundary; project only for metric filters.
-    remainder_world = boundary.difference(occupied_world)
+    remainder_world = before_buildings.difference(buildings_world)
     remainder = project(remainder_world)
     features, filtered = [], {'small': 0, 'narrow': 0}
-    overlays = {mode: [(project(shape(f['geometry'])), f['id']) for f in layers[mode]['geojson']['features']] for mode in ('free', 'auction')}
+    overlays = {mode: [(project(shape(f['geometry'])), f['id']) for f in layers.get(mode, {}).get('geojson', {}).get('features', [])] for mode in ('free', 'auction', 'pzz', 'restrictions')}
     for g in sorted(polygons(remainder), key=lambda x: (-x.area, x.centroid.x, x.centroid.y)):
         if g.area < params['min_area']:
             filtered['small'] += 1
@@ -48,9 +51,13 @@ def gaps(bounds, layers, params):
             'label': 'Промежуток ' + str(len(features)+1), 'area_m2': round(g.area, 2),
             'large_window': g.area > params['max_area'], 'touches_boundary': g.distance(b.boundary) < .1,
             'matches': {mode: [fid for other, fid in rows if g.intersection(other).area > .01] for mode, rows in overlays.items()},
+            'zone_intersections': {mode: [{'id': fid, 'area_m2': round(g.intersection(other).area, 2)} for other, fid in overlays[mode] if g.intersection(other).area > .01] for mode in ('pzz', 'restrictions')},
             'status': 'unverified', 'warning': WARNING}})
     return {'type': 'FeatureCollection', 'features': features}, {
-        'area_m2': round(b.area, 2), 'observed_parcels_m2': round(b.area - remainder.area, 2),
+        'area_m2': round(b.area, 2), 'observed_parcels_m2': round(b.area - project(before_buildings).area, 2),
+        'buildings_excluded_m2': round(project(before_buildings).area - remainder.area, 2),
+        'layer_counts': {mode: len(layers.get(mode, {}).get('geojson', {}).get('features', [])) for mode in MODES},
+        'pzz_coverage_confirmed': False, 'restrictions_coverage_confirmed': False,
         'remainder_m2': round(remainder.area, 2), 'filtered': filtered, 'parameters': params,
         'complete': False, 'warning': WARNING}
 
@@ -64,7 +71,7 @@ def run(project, params):
     store.set_setting('survey_attempt_' + project, attempt)
     layers = {}
     try:
-        for mode in ('parcels', 'free', 'auction'):
+        for mode in MODES:
             body = nspd.spatial_body(bounds, categories[mode]['categoryId'])
             data, digest = nspd.request_json(nspd.INTERSECTS, body)
             fc = nspd.normalize(data)

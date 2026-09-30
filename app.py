@@ -165,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
             project = project_name(data.get('project', 'trudovoe'))
             path = urlparse(self.path).path
             if path == '/api/survey':
-                return self.send(launch_job(project, 'Обследование трёх слоёв', lambda: survey.run(project, data)))
+                return self.send(launch_job(project, 'Обследование шести слоёв', lambda: survey.run(project, data)))
             if path == '/api/survey/watch':
                 with store.LOCK:
                     result = store.get_setting('survey_' + project, {})

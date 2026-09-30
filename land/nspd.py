@@ -23,7 +23,8 @@ BASE = 'https://nspd.gov.ru'
 INTERSECTS = BASE + '/api/geoportal/v1/intersects?typeIntersect=fullObject'
 TITLES = {'parcels': 'Земельные участки из ЕГРН',
           'free': 'Земельные участки, свободные от прав третьих лиц',
-          'auction': 'Земельные участки, выставленные на аукцион'}
+          'auction': 'Земельные участки, выставленные на аукцион',
+          'buildings': 'Здания', 'pzz': 'Территориальные зоны', 'restrictions': 'Иные ЗОУИТ'}
 LOCK = threading.Lock()
 LAST_REQUEST = 0.0
 WARNING = 'Полнота пространственного покрытия не подтверждена. Пустой ответ не доказывает отсутствие прав. Объекты требуют проверки.'
@@ -97,7 +98,8 @@ def normalize(data):
         seen.add(key)
         props = {k: p[k] for k in ('category', 'categoryName', 'label', 'externalKey', 'descr') if k in p}
         props['options'] = {k: options[k] for k in ('cad_num', 'specified_area', 'land_record_area', 'ownership_type',
-            'right_type', 'permitted_use_established_by_document', 'land_record_category_type', 'readable_address', 'status') if k in options}
+            'right_type', 'permitted_use_established_by_document', 'land_record_category_type', 'readable_address', 'status',
+            'legal_act_document_date', 'legal_act_document_issuer', 'legal_act_document_name', 'legal_act_document_number', 'name_by_doc', 'type_boundary_value', 'building_name', 'purpose', 'build_record_area', 'content_restrict_encumbrances', 'name', 'type_zone', 'reg_numb_border', 'zone_type') if k in options}
         result.append({'type': 'Feature', 'id': key, 'geometry': mapping(geom), 'properties': props})
     return {'type': 'FeatureCollection', 'features': result}
 

@@ -61,3 +61,27 @@ def test_failed_layer_preserves_previous_survey(tmp_path,monkeypatch):
     assert store.get_setting('survey_trudovoe')=={'old':True}
     assert store.get_setting('survey_attempt_trudovoe')['state']=='error'
     assert store.candidates('trudovoe')==[]
+
+
+def test_buildings_subtracted_zones_retained():
+    ls=layers()
+    building=box(34.207,44.993,34.208,44.994)
+    zone=box(34.2065,44.992,34.209,44.998)
+    ls['buildings']={'geojson':{'features':[feature(building,'building')]}}
+    ls['restrictions']={'geojson':{'features':[feature(zone,'zone')]}}
+    ls['pzz']={'geojson':{'features':[]}}
+    fc,s=survey.gaps(BOUNDS,ls,{'min_area':1,'max_area':1e7,'min_width':0})
+    remainder=unary_union([shape(f['geometry']) for f in fc['features']])
+    assert remainder.intersection(building).area<1e-12
+    assert remainder.intersection(zone).area>0
+    assert s['buildings_excluded_m2']>0
+    assert abs(s['area_m2']-s['observed_parcels_m2']-s['buildings_excluded_m2']-s['remainder_m2'])<.03
+    assert any(f['properties']['matches']['restrictions']==['zone'] for f in fc['features'])
+    assert s['pzz_coverage_confirmed'] is False
+
+
+def test_building_inside_parcel_not_double_counted():
+    ls=layers()
+    ls['buildings']={'geojson':{'features':[feature(box(34.2045,44.993,34.2055,44.995))]}}
+    fc,s=survey.gaps(BOUNDS,ls,{'min_area':1,'max_area':1e7,'min_width':0})
+    assert s['buildings_excluded_m2']==0
