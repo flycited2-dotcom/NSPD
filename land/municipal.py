@@ -163,6 +163,23 @@ def relate(result, survey):
             # Even an exact mention can be a neighbour or an example in a regulation.
             if boundary and any(shape(f['geometry']).intersection(boundary).area > 0 for f in obs.get('features', [])):
                 row['mentions_in_area'].append(mention)
+        candidates = {}
+        ocr = row.get('ocr') or {}
+        if ocr.get('source_sha256') == row.get('sha256'):
+            for page in ocr.get('pages', []):
+                if page['state'] != 'received':
+                    continue
+                for mention in page.get('mentions', []):
+                    n = mention['cadastral_number']
+                    record = candidates.setdefault(n, {'cadastral_number': n, 'pages': [], 'agreed_pages': [], 'single_pages': [], 'verification_required': True})
+                    record['pages'].append(page['page'])
+                    record['agreed_pages' if mention['agreement'] == 'both' else 'single_pages'].append(page['page'])
+        row['ocr_mentions'] = list(candidates.values())
+        row['ocr_mentions_in_area'] = []
+        for mention in row['ocr_mentions']:
+            obs = observations.get(mention['cadastral_number'], {})
+            if boundary and any(shape(f['geometry']).intersection(boundary).area > 0 for f in obs.get('features', [])):
+                row['ocr_mentions_in_area'].append(mention)
     return result
 
 

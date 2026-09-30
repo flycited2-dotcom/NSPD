@@ -118,11 +118,39 @@ def test_survey_watch_rejects_stale_and_deduplicates(server):
 def test_municipal_export_marks_interrupted_attempt_and_survey(server):
     store.set_setting('municipal_trudovoe', {'id':'m1','complete':False,'items':[],'survey_id':'old'})
     store.set_setting('municipal_attempt_trudovoe', {'state':'running'})
+    store.set_setting('municipal_ocr_attempt_trudovoe', {'state':'running','network_requests':0})
     store.set_setting('survey_trudovoe', {'id':'current'})
     with request(server, '/api/municipal/export') as r:
         body = json.load(r)
         assert 'municipal-evidence.json' in r.headers['Content-Disposition']
         assert body['result']['complete'] is False
         assert body['attempt']['state'] == 'interrupted'
+        assert body['ocr_attempt']['state'] == 'interrupted'
+        assert body['ocr_attempt']['network_requests'] == 0
         assert body['current_survey_id'] == 'current'
     assert store.candidates('trudovoe') == []
+
+
+def test_ocr_preview_is_bound_to_current_catalog_and_image(server):
+    import hashlib
+    raw = b'\x89PNG\r\n\x1a\nlocal-test-image'
+    digest = hashlib.sha256(b'local-pdf').hexdigest()
+    image_hash = hashlib.sha256(raw).hexdigest()
+    folder = store.DATA / 'ocr' / digest
+    folder.mkdir(parents=True)
+    (folder / 'p1-v0.png').write_bytes(raw)
+    row = {'id':'doc','sha256':digest,'ocr':{'source_sha256':digest,'pages':[
+        {'page':1,'state':'received','views':[{'image_sha256':image_hash}]}]}}
+    store.set_setting('municipal_trudovoe', {'items':[row]})
+    with request(server, '/api/municipal/ocr/page?document=doc&page=1&view=0') as r:
+        assert r.headers['Content-Type'] == 'image/png'
+        assert r.read() == raw
+    for suffix in ['document=other&page=1&view=0','document=doc&page=2&view=0',
+                   'document=doc&page=1&view=4','document=doc&page=oops&view=0']:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            request(server, '/api/municipal/ocr/page?' + suffix)
+        assert exc.value.code == 400
+    (folder / 'p1-v0.png').write_bytes(b'changed')
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server, '/api/municipal/ocr/page?document=doc&page=1&view=0')
+    assert exc.value.code == 400
