@@ -85,3 +85,34 @@ def test_building_inside_parcel_not_double_counted():
     ls['buildings']={'geojson':{'features':[feature(box(34.2045,44.993,34.2055,44.995))]}}
     fc,s=survey.gaps(BOUNDS,ls,{'min_area':1,'max_area':1e7,'min_width':0})
     assert s['buildings_excluded_m2']==0
+
+
+def test_road_designation_distance_not_legal_access():
+    ls=layers()
+    road=ls['parcels']['geojson']['features'][0]
+    road['properties']={'label':'road number','options':{'permitted_use_established_by_document':'Улично-дорожная сеть'}}
+    fc,s=survey.gaps(BOUNDS,ls,{'min_area':1,'max_area':1e7,'min_width':0})
+    assert s['road_designated_parcels']==1 and not s['roads_coverage_confirmed']
+    for f in fc['features']:
+        r=f['properties']['road_proximity']
+        assert r['distance_m']<.1 and r['parcel_id']==road['id']
+        assert not r['legal_access_confirmed']
+    road['properties']['options']['permitted_use_established_by_document']='Автомобильный транспорт; хранение автотранспорта'
+    fc,s=survey.gaps(BOUNDS,ls,{'min_area':1,'max_area':1e7,'min_width':0})
+    assert not survey.road_features(ls)
+    assert all(f['properties']['road_proximity'] is None for f in fc['features'])
+
+
+def test_recalculate_preserves_source_dates_and_history(tmp_path,monkeypatch):
+    monkeypatch.setattr(store,'DATA',tmp_path);store.init()
+    ls=layers()
+    for layer in ls.values():layer['received_at']='2026-09-01T00:00:00Z'
+    previous={'id':'previous','bounds':BOUNDS,'layers':ls}
+    store.set_setting('survey_trudovoe',previous)
+    saved_layers=store.get_setting('survey_trudovoe')['layers']
+    monkeypatch.setattr(survey.nspd,'request_json',lambda *a:pytest.fail('Recalculation must not fetch'))
+    survey.recalculate('trudovoe',{'min_area':1,'max_area':1e7,'min_width':0})
+    result=store.get_setting('survey_trudovoe')
+    assert result['parent_id']=='previous'
+    assert result['layers']==saved_layers and result['summary']['complete'] is False
+    assert (tmp_path/'surveys'/(result['id']+'.json')).is_file()

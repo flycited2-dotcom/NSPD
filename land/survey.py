@@ -11,6 +11,16 @@ WARNING = 'Предварительный контур, не подтвержд�
 MODES = ('parcels', 'free', 'auction', 'buildings', 'pzz', 'restrictions')
 
 
+def road_features(layers):
+    """Designation only: a parcel VRI does not establish lawful road access."""
+    result = []
+    for f in layers['parcels']['geojson']['features']:
+        vri = str(f['properties'].get('options', {}).get('permitted_use_established_by_document', '')).lower().replace('–', '-').replace('—', '-')
+        if 'улично-дорож' in vri or 'размещение автомобильных дорог' in vri:
+            result.append(f)
+    return result
+
+
 def parameters(params):
     values = {k: float(params.get(k, default)) for k, default in [('min_area', 400), ('max_area', 2500), ('min_width', 12)]}
     if not all(math.isfinite(v) for v in values.values()) or not (0 < values['min_area'] <= values['max_area'] <= 1e8 and 0 <= values['min_width'] <= 1000):
@@ -36,6 +46,7 @@ def gaps(bounds, layers, params):
     remainder = project(remainder_world)
     features, filtered = [], {'small': 0, 'narrow': 0}
     overlays = {mode: [(project(shape(f['geometry'])), f['id']) for f in layers.get(mode, {}).get('geojson', {}).get('features', [])] for mode in ('free', 'auction', 'pzz', 'restrictions')}
+    roads = [(project(shape(f['geometry'])), f) for f in road_features(layers)]
     for g in sorted(polygons(remainder), key=lambda x: (-x.area, x.centroid.x, x.centroid.y)):
         if g.area < params['min_area']:
             filtered['small'] += 1
@@ -47,19 +58,47 @@ def gaps(bounds, layers, params):
             raise ValueError('Слишком много промежутков. Уменьшите область или увеличьте минимальную площадь.')
         world = convert(g, metric).intersection(remainder_world)
         key = hashlib.sha256(world.normalize().wkb).hexdigest()[:16]
+        nearest = min(roads, key=lambda row: g.distance(row[0])) if roads else None
         features.append({'type': 'Feature', 'id': 'gap-' + key, 'geometry': mapping(world), 'properties': {
             'label': 'Промежуток ' + str(len(features)+1), 'area_m2': round(g.area, 2),
             'large_window': g.area > params['max_area'], 'touches_boundary': g.distance(b.boundary) < .1,
             'matches': {mode: [fid for other, fid in rows if g.intersection(other).area > .01] for mode, rows in overlays.items()},
             'zone_intersections': {mode: [{'id': fid, 'area_m2': round(g.intersection(other).area, 2)} for other, fid in overlays[mode] if g.intersection(other).area > .01] for mode in ('pzz', 'restrictions')},
+            'road_proximity': {'distance_m': round(g.distance(nearest[0]), 1), 'parcel_id': nearest[1]['id'],
+                               'label': nearest[1]['properties'].get('label', nearest[1]['id']), 'legal_access_confirmed': False} if nearest else None,
             'status': 'unverified', 'warning': WARNING}})
     return {'type': 'FeatureCollection', 'features': features}, {
         'area_m2': round(b.area, 2), 'observed_parcels_m2': round(b.area - project(before_buildings).area, 2),
         'buildings_excluded_m2': round(project(before_buildings).area - remainder.area, 2),
         'layer_counts': {mode: len(layers.get(mode, {}).get('geojson', {}).get('features', [])) for mode in MODES},
         'pzz_coverage_confirmed': False, 'restrictions_coverage_confirmed': False,
+        'road_designated_parcels': len(roads), 'roads_coverage_confirmed': False,
         'remainder_m2': round(remainder.area, 2), 'filtered': filtered, 'parameters': params,
         'complete': False, 'warning': WARNING}
+
+
+def save_result(project, bounds, layers, filters, parent_id=None):
+    fc, summary = gaps(bounds, layers, filters)
+    result = {'created_at': store.now(), 'bounds': bounds, 'layers': layers, 'gaps': fc, 'summary': summary,
+              'calculation_version': 2, 'parent_id': parent_id,
+              'roads': {'type': 'FeatureCollection', 'features': road_features(layers)}}
+    result['id'] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()[:20]
+    folder = store.DATA / 'surveys'
+    folder.mkdir(exist_ok=True)
+    (folder / (result['id'] + '.json')).write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+    store.set_setting('survey_' + project, result)
+    with store.connect() as db:
+        store.event(db, project, 'survey', {'id': result['id'], 'bounds': bounds, 'summary': summary,
+                                         'parent_id': parent_id, 'counts': summary['layer_counts']})
+    return {'count': len(fc['features']), 'id': result['id']}
+
+
+def recalculate(project, params):
+    previous = store.get_setting('survey_' + project, None)
+    if not previous:
+        raise ValueError('Сначала выполните обследование НСПД')
+    # No source dates are renewed: recalculation is not a new remote observation.
+    return save_result(project, previous['bounds'], previous['layers'], parameters(params), previous['id'])
 
 
 def run(project, params):
@@ -81,19 +120,11 @@ def run(project, params):
             layers[mode] = {'geojson': fc, 'sha256': digest, 'received_at': store.now(), 'request': body, 'source': nspd.INTERSECTS}
             attempt['completed_layers'].append(mode)
             store.set_setting('survey_attempt_' + project, attempt)
-        fc, summary = gaps(bounds, layers, filters)
-        result = {'id': hashlib.sha256(json.dumps(layers, sort_keys=True).encode()).hexdigest()[:20],
-                  'created_at': store.now(), 'bounds': bounds, 'layers': layers, 'gaps': fc, 'summary': summary}
-        folder = store.DATA / 'surveys'
-        folder.mkdir(exist_ok=True)
-        (folder / (result['id'] + '.json')).write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
-        store.set_setting('survey_' + project, result)
-        attempt.update(state='done', finished_at=store.now(), count=len(fc['features']))
-        with store.connect() as db:
-            store.event(db, project, 'survey', {'id': result['id'], 'bounds': bounds, 'summary': summary, 'counts': {k: len(v['geojson']['features']) for k,v in layers.items()}})
+        result = save_result(project, bounds, layers, filters)
+        attempt.update(state='done', finished_at=store.now(), count=result['count'])
     except Exception as exc:
         attempt.update(state='error', finished_at=store.now(), error=str(exc))
         raise
     finally:
         store.set_setting('survey_attempt_' + project, attempt)
-    return {'count': len(fc['features']), 'id': result['id']}
+    return result

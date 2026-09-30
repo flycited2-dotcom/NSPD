@@ -20,6 +20,7 @@ from land.demo import fixture_layers
 from land.exports import bundle, dossier
 from land import nspd
 from land import survey
+from land import publications
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -103,6 +104,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(state(project))
             if p.path == '/api/session':
                 return self.send({'token': TOKEN, 'app': 'land-recon'})
+            if p.path in ('/api/publications', '/api/publications/export'):
+                result = store.get_setting('publications_' + project, None)
+                return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/survey', '/api/survey/export'):
                 result = store.get_setting('survey_' + project, None)
                 attempt = store.get_setting('survey_attempt_' + project, None)
@@ -166,6 +170,10 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == '/api/survey':
                 return self.send(launch_job(project, 'Обследование шести слоёв', lambda: survey.run(project, data)))
+            if path == '/api/survey/recalculate':
+                return self.send(launch_job(project, 'Пересчёт сохранённой геометрии', lambda: survey.recalculate(project, data)))
+            if path == '/api/publications':
+                return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/survey/watch':
                 with store.LOCK:
                     result = store.get_setting('survey_' + project, {})
