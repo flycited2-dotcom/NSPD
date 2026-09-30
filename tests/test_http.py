@@ -195,3 +195,19 @@ def test_torgi_documents_export_preserves_scope_and_interruption(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         request(server,'/api/torgi/documents/read',{'id':'docs'},token=False)
     assert exc.value.code==403
+
+
+def test_georeference_export_keeps_preview_status_and_revisions(server):
+    store.set_setting('schemes_trudovoe',{'id':'new-schemes','documents':[]})
+    store.set_setting('survey_trudovoe',{'id':'new-survey'})
+    store.set_setting('georeference_trudovoe',{'id':'preview','schemes_id':'old','survey_id':'old-survey',
+                      'geometry_confirmed':False,'preview_georeferenced':True,'operation_code':'EPSG:5044'})
+    store.set_setting('georeference_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/georeference/export') as r:
+        body=json.load(r)
+        assert 'scheme-georeference-preview.json' in r.headers['Content-Disposition']
+        assert body['attempt']['state']=='interrupted'
+        assert body['current_schemes_id']=='new-schemes' and body['current_survey_id']=='new-survey'
+        assert body['result']['preview_georeferenced'] and not body['result']['geometry_confirmed']
+    with pytest.raises(urllib.error.HTTPError) as exc:request(server,'/api/georeference',{},token=False)
+    assert exc.value.code==403

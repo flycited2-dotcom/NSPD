@@ -26,6 +26,7 @@ from land import municipal
 from land import ocr
 from land import schemes
 from land import torgi_docs
+from land import georeference
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -123,6 +124,17 @@ class Handler(BaseHTTPRequestHandler):
                 remaining = len(schemes.pending(catalog, result or {})) if catalog else 0
                 return self.send({'result':result, 'attempt':attempt, 'current_catalog_id':catalog.get('id'), 'remaining':remaining},
                                  filename='scheme-coordinates.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/georeference','/api/georeference/export'):
+                result=store.get_setting('georeference_'+project)
+                attempt=store.get_setting('georeference_attempt_'+project)
+                current=store.get_setting('schemes_'+project,{}) or {}
+                survey_result=store.get_setting('survey_'+project,{}) or {}
+                with JOB_LOCK:
+                    active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
+                if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
+                return self.send({'result':result,'attempt':attempt,'choices':georeference.choices(current),
+                                  'current_schemes_id':current.get('id'),'current_survey_id':survey_result.get('id')},
+                                 filename='scheme-georeference-preview.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/torgi/documents', '/api/torgi/documents/export'):
                 result = store.get_setting('torgi_documents_' + project, None)
                 attempt = store.get_setting('torgi_documents_attempt_' + project, None)
@@ -240,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Локальное распознавание сканов', lambda: ocr.run(project, data)))
             if path == '/api/schemes':
                 return self.send(launch_job(project, 'Извлечение таблиц координат', lambda: schemes.run(project, data)))
+            if path == '/api/georeference':
+                return self.send(launch_job(project, 'Проверка предварительной геопривязки', lambda: georeference.run(project,data)))
             if path == '/api/torgi/documents':
                 return self.send(launch_job(project, 'Карточки и вложения ГИС Торги', lambda: torgi_docs.metadata(project, data)))
             if path == '/api/torgi/documents/read':

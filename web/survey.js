@@ -35,6 +35,7 @@ async function refreshSurvey(){
  const [w,south,e,n]=r.bounds;L.rectangle([[south,w],[n,e]],{color:'#333',weight:1,fill:false,dashArray:'5 5'}).addTo(sdraw);smap.fitBounds([[south,w],[n,e]],{padding:[16,16]});
    if(typeof refreshTorgi==='function')await refreshTorgi();
    if(typeof refreshMunicipal==='function')await refreshMunicipal();
+   if(typeof refreshGeoreference==='function')await refreshGeoreference();
 }
 async function runSurvey(recalculate=false){
  if(running)return;running=true;stopSelection();document.querySelectorAll('button').forEach(b=>b.disabled=true);
