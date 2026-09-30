@@ -18,6 +18,10 @@ MAX_BYTES = 25 * 1024 * 1024
 SENSITIVE = ('token', 'key', 'auth', 'cookie', 'password', 'secret', 'session', 'signature')
 
 
+class ResponseTooLarge(ValueError):
+    """A bounded download was deliberately stopped, not a transport/access error."""
+
+
 def public_url(url):
     p = urlparse(url)
     if p.scheme != 'https' or not p.hostname or p.username or p.password or p.port not in (None, 443):
@@ -31,7 +35,7 @@ def public_url(url):
     return url
 
 
-def fetch(url):
+def fetch(url, max_bytes=MAX_BYTES):
     public_url(url)
     with requests.get(url, timeout=(8, 18), stream=True, allow_redirects=False,
                       headers={'User-Agent': 'LandRecon/1.0 (local read-only research)', 'Accept': 'application/geo+json,application/json,text/html;q=0.8'}) as r:
@@ -43,8 +47,8 @@ def fetch(url):
         chunks, size = [], 0
         for chunk in r.iter_content(65536):
             size += len(chunk)
-            if size > MAX_BYTES:
-                raise ValueError('Ответ превышает 25 МБ')
+            if size > max_bytes:
+                raise ResponseTooLarge(f'Ответ превышает {max_bytes // (1024 * 1024)} МБ')
             chunks.append(chunk)
         return b''.join(chunks), r.headers.get('Content-Type', ''), r.status_code
 

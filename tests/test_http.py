@@ -113,3 +113,16 @@ def test_survey_watch_rejects_stale_and_deduplicates(server):
     with request(server, '/api/survey/export') as r:
         assert json.load(r)['summary']['complete'] is False
     assert store.candidates('trudovoe') == []
+
+
+def test_municipal_export_marks_interrupted_attempt_and_survey(server):
+    store.set_setting('municipal_trudovoe', {'id':'m1','complete':False,'items':[],'survey_id':'old'})
+    store.set_setting('municipal_attempt_trudovoe', {'state':'running'})
+    store.set_setting('survey_trudovoe', {'id':'current'})
+    with request(server, '/api/municipal/export') as r:
+        body = json.load(r)
+        assert 'municipal-evidence.json' in r.headers['Content-Disposition']
+        assert body['result']['complete'] is False
+        assert body['attempt']['state'] == 'interrupted'
+        assert body['current_survey_id'] == 'current'
+    assert store.candidates('trudovoe') == []

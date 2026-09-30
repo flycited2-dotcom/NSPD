@@ -22,6 +22,7 @@ from land import nspd
 from land import survey
 from land import publications
 from land import torgi
+from land import municipal
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -105,6 +106,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(state(project))
             if p.path == '/api/session':
                 return self.send({'token': TOKEN, 'app': 'land-recon'})
+            if p.path in ('/api/municipal', '/api/municipal/export'):
+                result = store.get_setting('municipal_' + project, None)
+                attempt = store.get_setting('municipal_attempt_' + project, None)
+                with JOB_LOCK:
+                    active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
+                if attempt and attempt['state'] == 'running' and not active:
+                    attempt = dict(attempt, state='interrupted')
+                return self.send({'result': result, 'attempt': attempt,
+                                  'current_survey_id': (store.get_setting('survey_' + project, {}) or {}).get('id')},
+                                 filename='municipal-evidence.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/publications', '/api/publications/export'):
                 result = store.get_setting('publications_' + project, None)
                 return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
@@ -187,6 +198,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Обследование шести слоёв', lambda: survey.run(project, data)))
             if path == '/api/survey/recalculate':
                 return self.send(launch_job(project, 'Пересчёт сохранённой геометрии', lambda: survey.recalculate(project, data)))
+            if path == '/api/municipal':
+                return self.send(launch_job(project, 'Каталог муниципальных документов', lambda: municipal.catalog(project)))
+            if path == '/api/municipal/read':
+                return self.send(launch_job(project, 'Чтение муниципальных документов', lambda: municipal.read(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/torgi':
