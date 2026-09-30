@@ -154,3 +154,20 @@ def test_ocr_preview_is_bound_to_current_catalog_and_image(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         request(server, '/api/municipal/ocr/page?document=doc&page=1&view=0')
     assert exc.value.code == 400
+
+
+def test_schemes_export_is_local_coordinates_and_marks_stale_interrupted(server):
+    from land import schemes
+    table=schemes.extract([(19,'Обозначение земельного участка :ЗУ1\nКоординаты, м\nX Y\n1 2 3\nн1 100,0 100,0\nн2 120,0 100,0\nн3 120,0 120,0\n')])
+    store.set_setting('municipal_trudovoe',{'id':'current','items':[]})
+    store.set_setting('schemes_trudovoe',{'catalog_id':'old','documents':[dict(table,document_id='doc')]})
+    store.set_setting('schemes_attempt_trudovoe',{'state':'running','network_requests':0})
+    with request(server,'/api/schemes/export') as r:
+        body=json.load(r)
+        assert 'scheme-coordinates.json' in r.headers['Content-Disposition']
+        assert body['attempt']['state']=='interrupted' and body['remaining']==0
+        assert body['current_catalog_id']=='current' and body['result']['catalog_id']=='old'
+        t=body['result']['documents'][0]['tables'][0]
+        assert not t['georeferenced'] and not t['geometry_confirmed']
+        assert 'coordinates' not in t and 'outline_xy' in t
+    assert store.candidates('trudovoe')==[]
