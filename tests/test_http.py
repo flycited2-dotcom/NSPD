@@ -215,6 +215,24 @@ def test_torgi_local_reprocess_export_queue_and_post_guard(server):
     assert exc.value.code==403
 
 
+def test_torgi_visual_queue_interrupted_export_and_preview_guards(server):
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','cards':[],'files':{
+        'image':{'key':'image','state':'read','format':'jpg','eligible':True,'sha256':'a'*64,'received_at':'original'},
+        'pdf':{'key':'pdf','state':'read','format':'pdf','eligible':True,'sha256':'b'*64,'processed_pages':2,
+               'image_or_sparse_pages':[1,2]}}})
+    store.set_setting('torgi_visual_attempt_trudovoe',{'state':'running','network_requests':0})
+    with request(server,'/api/torgi/documents/export') as r:
+        data=json.load(r)
+        assert data['visual_remaining']==3 and data['visual_attempt']['state']=='interrupted'
+        assert data['result']['files']['image']['received_at']=='original'
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server,'/api/torgi/documents/ocr',{'id':'docs'},token=False)
+    assert exc.value.code==403
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server,'/api/torgi/documents/image?file=unknown')
+    assert exc.value.code==400
+
+
 def test_georeference_export_keeps_preview_status_and_revisions(server):
     store.set_setting('schemes_trudovoe',{'id':'new-schemes','documents':[]})
     store.set_setting('survey_trudovoe',{'id':'new-survey'})

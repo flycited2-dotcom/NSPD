@@ -5,9 +5,15 @@ from pathlib import Path
 import sys
 from . import municipal, schemes, egrn_coordinates
 from .docx_text import docx_text, read_docx, ALGORITHM as DOCX_ALGORITHM
+from . import image_evidence
 
 
 def extract(raw,fmt):
+    if fmt in image_evidence.FORMATS:
+        png,info=image_evidence.preview(raw,fmt)
+        return {'unit':'image','image':dict(info,preview_sha256=hashlib.sha256(png).hexdigest()),
+                'mentions':[],'tables':[],'geometry_confirmed':False,'georeferenced':False,
+                'text_layer_complete':False},[]
     if fmt=='pdf':
         details,pages=municipal.pdf_text(raw)
         result=schemes.apply_page_limit(schemes.extract(pages),details['processed_pages'],details['unread_pages'])
@@ -35,8 +41,12 @@ def main():
         raw=path.read_bytes()
         if hashlib.sha256(raw).hexdigest()!=digest:raise ValueError('SHA-256 файла изменился')
         result,pages=extract(raw,fmt)
-        path.with_suffix('.txt').write_text('\n'.join(f'UNIT {n}\n{text}' for n,text in pages),encoding='utf-8')
-        print(json.dumps({**result,'sha256':digest,'algorithm':DOCX_ALGORITHM if fmt=='docx' else 'torgi-file-text-v2'},ensure_ascii=False))
+        if fmt in image_evidence.FORMATS:
+            png,_=image_evidence.preview(raw,fmt)
+            path.with_suffix('.preview.png').write_bytes(png)
+        else:path.with_suffix('.txt').write_text('\n'.join(f'UNIT {n}\n{text}' for n,text in pages),encoding='utf-8')
+        algorithm=DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else 'torgi-file-text-v2'
+        print(json.dumps({**result,'sha256':digest,'algorithm':algorithm},ensure_ascii=False))
     except Exception as exc:
         print(json.dumps({'error':str(exc)[:500]},ensure_ascii=False));raise SystemExit(1)
 

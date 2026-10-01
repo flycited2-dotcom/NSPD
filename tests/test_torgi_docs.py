@@ -80,7 +80,7 @@ def test_explicit_retry_prioritizes_transport_errors_only():
 
 
 def test_conflicting_inactive_unsupported_and_large_files_excluded():
-    c1=docs.normalize_card(card(noticeAttachments=[attachment(),attachment(fileId='c'*24,fileName='scan.jpg'),
+    c1=docs.normalize_card(card(noticeAttachments=[attachment(),attachment(fileId='c'*24,fileName='scan.gif'),
                                                   attachment(fileId='d'*24,fileSize=9*1024*1024),
                                                   attachment(fileId='e'*24,inactive=True)]),lot())
     c2=docs.normalize_card(card(2,noticeAttachments=[attachment(hash='f'*64)]),lot(2))

@@ -80,6 +80,7 @@ async def process(path, digest, number, folder):
                 result.update(view=index, image_sha256=hashlib.sha256(image_path.read_bytes()).hexdigest())
                 views.append(result)
             return {'algorithm': ALGORITHM, 'source_sha256': digest, 'page': number, 'engine': info, 'views': views,
+                    'source_format': 'pdf',
                     'processed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
         finally:
             page.close()
@@ -87,11 +88,33 @@ async def process(path, digest, number, folder):
         doc.close()
 
 
+async def process_image(path, digest, fmt, folder):
+    from .image_evidence import preview
+    ocr, info = engine()
+    raw = path.read_bytes()
+    if len(raw) > 8 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError('Размер или SHA-256 изображения не соответствует источнику')
+    views = []
+    for index, side in enumerate(LONG_SIDES):
+        if side > info['max_image_dimension']:
+            raise ValueError('Разрешение превышает лимит OCR Windows')
+        png, _ = preview(raw, fmt, side)
+        target = folder / f'p1-v{index}.png'
+        target.write_bytes(png)
+        result = await asyncio.wait_for(recognize(ocr, target), timeout=20)
+        result.update(view=index, image_sha256=hashlib.sha256(png).hexdigest())
+        views.append(result)
+    return {'algorithm': ALGORITHM, 'source_sha256': digest, 'source_format': fmt, 'page': 1,
+            'engine': info, 'views': views, 'processed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+
+
 def main():
     sys.stdout.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser()
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--pdf', type=Path)
+    parser.add_argument('--image', type=Path)
+    parser.add_argument('--source-format', choices=('jpg','jpeg','png'))
     parser.add_argument('--sha256')
     parser.add_argument('--page', type=int)
     parser.add_argument('--folder', type=Path)
@@ -102,7 +125,8 @@ def main():
             print(json.dumps(info, ensure_ascii=False))
         else:
             args.folder.mkdir(parents=True, exist_ok=True)
-            result = asyncio.run(process(args.pdf, args.sha256, args.page, args.folder))
+            result = asyncio.run(process_image(args.image, args.sha256, args.source_format, args.folder)
+                                 if args.image else process(args.pdf, args.sha256, args.page, args.folder))
             target = args.folder / f'p{args.page}-{ALGORITHM}.json'
             target.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
             print(json.dumps({'page': args.page, 'algorithm': ALGORITHM}))

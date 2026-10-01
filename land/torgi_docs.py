@@ -10,11 +10,13 @@ import time
 from . import store, torgi
 from .network import fetch, ResponseTooLarge
 from .docx_text import ALGORITHM as DOCX_ALGORITHM
+from . import image_evidence
 
 CARD = 'https://torgi.gov.ru/new/api/public/lotcards/'
 FILE = 'https://torgi.gov.ru/new/file-store/v1/'
 BATCH = 5
 MAX_BYTES = 8*1024*1024
+READ_FORMATS = ('pdf','docx',*image_evidence.FORMATS)
 ALGORITHM = 'torgi-file-text-v2'
 ROOT = Path(__file__).resolve().parent.parent
 WARNING = 'Файлы извещения могут относиться ко многим лотам. Номер в документе не подтверждает предмет лота, геометрию, действующие условия или доступность земли. Подписи и права не проверены.'
@@ -68,7 +70,7 @@ def files_for(cards, prior):
             versions.setdefault(attachment['file_id'],set()).add(key)
             if key not in files:
                 old=copy.deepcopy(prior.get(key) or {})
-                initial='inactive' if attachment['inactive'] else 'oversized' if attachment['declared_size']>MAX_BYTES else 'pending' if attachment['format'] in ('pdf','docx') else 'unsupported'
+                initial='inactive' if attachment['inactive'] else 'oversized' if attachment['declared_size']>MAX_BYTES else 'pending' if attachment['format'] in READ_FORMATS else 'unsupported'
                 files[key]={**old,**attachment,'associations':[]}
                 files[key].setdefault('state',initial)
             f=files[key]
@@ -77,7 +79,7 @@ def files_for(cards, prior):
         file['metadata_conflict']=len(versions[file['file_id']])>1
         file['eligible']=not file['metadata_conflict'] and any(not a['inactive'] for a in file['associations'])
         if file['state']=='inactive' and file['eligible']:
-            file['state']='oversized' if file['declared_size']>MAX_BYTES else 'pending' if file['format'] in ('pdf','docx') else 'unsupported'
+            file['state']='oversized' if file['declared_size']>MAX_BYTES else 'pending' if file['format'] in READ_FORMATS else 'unsupported'
     return files
 
 
@@ -93,7 +95,8 @@ def file_queue(result,retry=False):
         if f.get('type_code')=='Basis_for_sale' or any(a['scope']=='lot' for a in f['associations']):return 1
         if f.get('type_code') in ('Application_Form','Draft_Contract') or any(x in name for x in ('квитанц','задат','договор','заявк')):return 3
         return 2
-    return sorted((f for f in result.get('files',{}).values() if f.get('eligible') and (f['state']=='pending' or (retry and f['state']=='error'))),
+    return sorted((f for f in result.get('files',{}).values() if f.get('eligible') and (f['state']=='pending' or (retry and f['state']=='error')
+                  or (f['state']=='unsupported' and f['format'] in image_evidence.FORMATS and f['declared_size']<=MAX_BYTES))),
                   key=lambda f: (0 if retry and f['state']=='error' else 1, priority(f)))
 
 
@@ -205,7 +208,7 @@ def extract_file(path,digest,fmt):
     if len(r.stdout)>4*1024*1024:raise ValueError('Результат чтения превышает лимит')
     result=json.loads(r.stdout)
     if r.returncode or result.get('error'):raise ValueError(result.get('error') or 'Ошибка чтения файла')
-    algorithm=DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
+    algorithm=DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else ALGORITHM
     if result.get('sha256')!=digest or result.get('algorithm')!=algorithm:raise ValueError('Чтение относится к другому файлу')
     return result
 
@@ -236,7 +239,8 @@ def read(project,params):
             file.update(received_at=store.now(),sha256=digest,http_status=code,content_type=ct,actual_size=len(raw))
             try:
                 if len(raw)!=file['declared_size']:raise ValueError('Размер скачанного файла отличается от карточки')
-                if not raw.startswith(b'%PDF-' if file['format']=='pdf' else b'PK\x03\x04'):raise ValueError('Содержимое не соответствует формату PDF/DOCX')
+                signature={'pdf':b'%PDF-','docx':b'PK\x03\x04','jpg':b'\xff\xd8\xff','jpeg':b'\xff\xd8\xff','png':b'\x89PNG\r\n\x1a\n'}[file['format']]
+                if not raw.startswith(signature):raise ValueError('Содержимое не соответствует формату файла')
                 path.write_bytes(raw)
                 file.update(extract_file(path,digest,file['format']),state='read',geometry_confirmed=False)
                 file.pop('error',None)

@@ -27,6 +27,7 @@ from land import ocr
 from land import schemes
 from land import torgi_docs
 from land import georeference
+from land import torgi_visual
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -113,6 +114,10 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == '/api/municipal/ocr/page':
                 raw = ocr.preview(project, query.get('document', [''])[0], int(query.get('page', ['0'])[0]), int(query.get('view', ['1'])[0]))
                 return self.send(raw, content_type='image/png')
+            if p.path == '/api/torgi/documents/image':
+                number = int(query['page'][0]) if 'page' in query else None
+                view = int(query.get('view', ['0'])[0]) if number is not None else None
+                return self.send(torgi_visual.preview(project, query.get('file', [''])[0], number, view), content_type='image/png')
             if p.path in ('/api/schemes', '/api/schemes/export'):
                 result = store.get_setting('schemes_' + project, None)
                 attempt = store.get_setting('schemes_attempt_' + project, None)
@@ -140,14 +145,17 @@ class Handler(BaseHTTPRequestHandler):
                 attempt = store.get_setting('torgi_documents_attempt_' + project, None)
                 reading = store.get_setting('torgi_files_attempt_' + project, None)
                 reprocessing = store.get_setting('torgi_reprocess_attempt_' + project, None)
+                visual = store.get_setting('torgi_visual_attempt_' + project, None)
                 search = store.get_setting('torgi_' + project, None)
                 with JOB_LOCK:
                     active = any(j['state']=='running' and j['project']==project for j in JOBS.values())
                 if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
                 if reading and reading['state']=='running' and not active:reading=dict(reading,state='interrupted')
                 if reprocessing and reprocessing['state']=='running' and not active:reprocessing=dict(reprocessing,state='interrupted')
+                if visual and visual['state']=='running' and not active:visual=dict(visual,state='interrupted')
                 same = result and search and result.get('search_created_at')==search['created_at']
                 return self.send({'result':result,'attempt':attempt,'reading_attempt':reading,'reprocess_attempt':reprocessing,'current_search_id':(search or {}).get('id'),
+                                  'visual_attempt':visual,'visual_remaining':len(torgi_visual.queue(result or {})),
                                   'cards_remaining':len(torgi_docs.metadata_queue(search,result if same else {})) if search else 0,
                                   'files_to_reprocess':len(torgi_docs.reprocess_queue(result or {})),
                                   'files_remaining':len(torgi_docs.file_queue(result or {}))},
@@ -230,12 +238,27 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError) as exc:
             self.send({'error': str(exc)}, 400)
 
+    def reject_post(self, message):
+        # On Windows, closing a socket with an unread body can erase the 403 response.
+        # Drain only small bodies without parsing, using a one-second socket timeout.
+        timeout = self.connection.gettimeout()
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+            if 0 < size <= 65536:
+                self.connection.settimeout(1)
+                self.rfile.read(size)
+        except (ValueError, OSError):
+            pass
+        finally:
+            self.connection.settimeout(timeout)
+        return self.send({'error': message}, 403)
+
     def do_POST(self):
         if not self.allowed() or self.headers.get('X-Local-Token') != TOKEN:
-            return self.send({'error': 'Обновите страницу приложения'}, 403)
+            return self.reject_post('Обновите страницу приложения')
         origin = self.headers.get('Origin')
         if origin and origin not in [f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}']:
-            return self.send({'error': 'Недопустимый источник запроса'}, 403)
+            return self.reject_post('Недопустимый источник запроса')
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if size <= 0 or size > 30 * 1024 * 1024:
@@ -263,6 +286,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Чтение вложений ГИС Торги', lambda: torgi_docs.read(project, data)))
             if path == '/api/torgi/documents/reprocess':
                 return self.send(launch_job(project, 'Локальное перечтение PDF/DOCX торгов', lambda: torgi_docs.reprocess(project, data)))
+            if path == '/api/torgi/documents/ocr':
+                return self.send(launch_job(project, 'Локальное OCR изображений и PDF торгов', lambda: torgi_visual.run(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/torgi':
