@@ -21,6 +21,15 @@ SOURCES = (
 MAX_ITEMS, BATCH, MAX_PAGES = 500, 5, 40
 WORDS = ('земель', 'сервитут', 'планиров', 'межеван', 'пзз', 'аукцион', 'торги', 'извещение', 'обсужд')
 WARNING = 'Это ограниченный каталог трёх перечней, не полная история заявлений. Номер в тексте — упоминание, а не доказательство предмета извещения. Схемы без проверенных координат не размещаются на карте. Правовой статус, действующая редакция и сроки требуют отдельной проверки.'
+LARGE_PDF_ALGORITHM = 'municipal-large-pdf-v1'
+
+
+def pdf_scope(row):
+    if row.get('large_pdf_algorithm') == LARGE_PDF_ALGORITHM:
+        return 32, 200
+    if row.get('local_pdf_algorithm') == 'municipal-local-pdf-v1':
+        return 16, 120
+    return 8, 40
 
 
 def safe_link(base, href):
@@ -91,15 +100,18 @@ def evidence(pages):
 
 
 def pdf_text(raw, max_bytes=8 * 1024 * 1024, max_pages=None):
-    if max_bytes not in (8 * 1024 * 1024,16 * 1024 * 1024):
+    if max_bytes not in (8 * 1024 * 1024,16 * 1024 * 1024,32 * 1024 * 1024):
         raise ValueError('Недопустимый лимит PDF')
-    if max_pages is not None and max_pages not in (40,120):raise ValueError('Недопустимый лимит страниц PDF')
+    if max_pages is not None and max_pages not in (40,120,200):raise ValueError('Недопустимый лимит страниц PDF')
+    if max_pages==200 and max_bytes!=32*1024*1024:raise ValueError('200 страниц разрешены только для крупных PDF')
     limit=MAX_PAGES if max_pages is None else max_pages
     if not raw.startswith(b'%PDF-') or len(raw) > max_bytes:
         raise ValueError(f'Ожидался PDF не более {max_bytes // (1024 * 1024)} МБ')
     reader = PdfReader(io.BytesIO(raw))
     if reader.is_encrypted:
         raise ValueError('Зашифрованный PDF не читается')
+    if max_bytes == 32 * 1024 * 1024:
+        return pdfium_text(raw, limit)
     count = len(reader.pages)
     if not count:
         raise ValueError('PDF без страниц')
@@ -118,6 +130,40 @@ def pdf_text(raw, max_bytes=8 * 1024 * 1024, max_pages=None):
     return {**evidence(pages), 'total_pages': count, 'processed_pages': len(pages),
             'unread_pages': count - len(pages), 'image_or_sparse_pages': image_pages,
             'text_layer_complete': count == len(pages) and not image_pages}, pages
+
+
+def pdfium_text(raw, limit):
+    """The large-file child uses PDFium; dense vector drawings exhaust pypdf's text timer."""
+    import pypdfium2 as pdfium
+    document = pdfium.PdfDocument(raw)
+    try:
+        count = len(document)
+        if not count:
+            raise ValueError('PDF без страниц')
+        pages, image_pages = [], []
+        for index in range(min(count, limit)):
+            page = document[index]
+            try:
+                textpage = page.get_textpage()
+                try:
+                    if textpage.count_chars() > 500000:
+                        raise ValueError('Текст страницы превышает лимит')
+                    text = textpage.get_text_range(errors='strict').replace('\r\n', '\n').replace('\r', '\n')
+                    if len(text) > 500000:
+                        raise ValueError('Текст страницы превышает лимит')
+                finally:
+                    textpage.close()
+            finally:
+                page.close()
+            pages.append((index + 1, text))
+            if len(''.join(text.split())) < 20:
+                image_pages.append(index + 1)
+        return {**evidence(pages), 'total_pages': count, 'processed_pages': len(pages),
+                'unread_pages': count - len(pages), 'image_or_sparse_pages': image_pages,
+                'text_layer_complete': count == len(pages) and not image_pages,
+                'text_engine': 'PDFium'}, pages
+    finally:
+        document.close()
 
 
 def kind(title):

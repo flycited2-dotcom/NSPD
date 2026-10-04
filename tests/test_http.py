@@ -41,6 +41,18 @@ def test_municipal_local_export_and_protected_endpoint(server):
     assert error.value.code==403
 
 
+def test_municipal_large_export_and_protected_endpoint(server):
+    store.set_setting('municipal_trudovoe',{'id':'m1','items':[]})
+    store.set_setting('municipal_large_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/municipal/export?project=trudovoe') as r:
+        data=json.load(r)
+    assert data['large_remaining']==0 and data['large_retry_remaining']==0
+    assert data['large_attempt']['state']=='interrupted'
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(server,'/api/municipal/large',{'project':'trudovoe','id':'m1'},token=False)
+    assert error.value.code==403
+
+
 def test_http_demo_dossier_and_export(server):
     with request(server,'/api/demo',{'project':'demo'}) as r:
         assert json.load(r)['count'] > 0

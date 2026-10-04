@@ -11,24 +11,27 @@ ROOT=Path(__file__).resolve().parent.parent
 def queue(result):
     return sorted((r for r in (result or {}).get('items',[]) if r.get('format')=='pdf' and r.get('sha256')
         and r.get('local_pdf_attempt_algorithm')!=ALGORITHM and r.get('local_pdf_algorithm')!=ALGORITHM
+        and r.get('large_pdf_algorithm')!=municipal.LARGE_PDF_ALGORITHM
         and ((r['state']=='read' and r.get('unread_pages',0)>0)
              or (r['state']=='rejected' and r.get('error')=='Ожидался PDF не более 8 МБ'))),
         key=lambda r:(r['kind']!='planning',r['id']))
 
-def read_saved(digest):
+def read_saved(digest, max_mib=16):
+    if max_mib not in (16,32):raise ValueError('Недопустимый лимит PDF')
     if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):raise ValueError('Некорректный SHA-256 PDF')
     path=store.DATA/'municipal'/(digest+'.pdf')
-    if not path.is_file() or path.stat().st_size>MAX_BYTES or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
-        raise ValueError('Сохранённый PDF отсутствует, превышает 16 МБ или изменился')
+    if not path.is_file() or path.stat().st_size>max_mib*1024*1024 or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
+        raise ValueError(f'Сохранённый PDF отсутствует, превышает {max_mib} МБ или изменился')
     opts={'creationflags':subprocess.CREATE_NO_WINDOW} if sys.platform=='win32' else {}
     try:
-        output=subprocess.run([sys.executable,'-m','land.municipal_pdf_worker',str(path.resolve()),digest],
+        output=subprocess.run([sys.executable,'-m','land.municipal_pdf_worker',str(path.resolve()),digest,*(['32'] if max_mib==32 else [])],
             cwd=ROOT,capture_output=True,encoding='utf-8',timeout=60,**opts)
     except subprocess.TimeoutExpired as exc:raise ValueError('Локальное чтение PDF превысило время; процесс остановлен') from exc
     if len(output.stdout)>4*1024*1024:raise ValueError('Результат локального чтения превышает лимит')
     result=json.loads(output.stdout)
     if output.returncode or result.get('error'):raise ValueError(result.get('error') or 'Ошибка локального чтения PDF')
-    if result.get('source_sha256')!=digest or result.get('local_pdf_algorithm')!=ALGORITHM:
+    key,algorithm=('large_pdf_algorithm',municipal.LARGE_PDF_ALGORITHM) if max_mib==32 else ('local_pdf_algorithm',ALGORITHM)
+    if result.get('source_sha256')!=digest or result.get(key)!=algorithm:
         raise ValueError('Результат относится к другому источнику/алгоритму')
     return result
 

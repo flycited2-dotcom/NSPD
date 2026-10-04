@@ -149,13 +149,13 @@ def big_pdf():
     result=io.BytesIO();writer.write(result);return result.getvalue()
 
 
-def test_extended_pdf_limit_is_only_for_torgi_and_keeps_page_scope():
+def test_default_pdf_limit_stays_8_mib_and_explicit_profiles_keep_page_scope():
     raw=big_pdf()
     with pytest.raises(ValueError,match='8 МБ'):municipal.pdf_text(raw)
     evidence,_=extract(raw,'pdf')
     assert evidence['processed_pages']==1 and evidence['total_pages']==1
     assert evidence['image_or_sparse_pages']==[1] and not evidence['text_layer_complete']
-    with pytest.raises(ValueError):municipal.pdf_text(raw,max_bytes=32*1024*1024)
+    with pytest.raises(ValueError):municipal.pdf_text(raw,max_bytes=48*1024*1024)
 
 
 @pytest.fixture

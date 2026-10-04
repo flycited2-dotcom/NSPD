@@ -50,12 +50,14 @@ async def recognize(ocr, path):
 async def process(path, digest, number, folder, max_pdf_mib=8, max_pdf_pages=40):
     import pypdfium2 as pdfium
     ocr, info = engine()
+    if max_pdf_mib not in (8,16,32) or path.stat().st_size > max_pdf_mib * 1024 * 1024:
+        raise ValueError('Размер сохранённого PDF превышает лимит')
     raw = path.read_bytes()
-    if max_pdf_mib not in (8,16) or len(raw) > max_pdf_mib * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
+    if max_pdf_mib not in (8,16,32) or len(raw) > max_pdf_mib * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
         raise ValueError('Размер или SHA-256 сохранённого PDF не соответствует источнику')
     doc = pdfium.PdfDocument(raw)
     try:
-        if max_pdf_pages not in (40,120) or not 1 <= number <= min(len(doc), max_pdf_pages):
+        if max_pdf_pages not in (40,120,200) or (max_pdf_pages==200 and max_pdf_mib!=32) or not 1 <= number <= min(len(doc), max_pdf_pages):
             raise ValueError(f'Страница вне разрешённых границ 1–{max_pdf_pages}')
         page = doc[number - 1]
         try:
@@ -113,8 +115,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--pdf', type=Path)
-    parser.add_argument('--max-pdf-mib',type=int,choices=(8,16),default=8)
-    parser.add_argument('--max-pdf-pages',type=int,choices=(40,120),default=40)
+    parser.add_argument('--max-pdf-mib',type=int,choices=(8,16,32),default=8)
+    parser.add_argument('--max-pdf-pages',type=int,choices=(40,120,200),default=40)
     parser.add_argument('--image', type=Path)
     parser.add_argument('--source-format', choices=('jpg','jpeg','png'))
     parser.add_argument('--sha256')

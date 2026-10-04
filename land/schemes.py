@@ -125,15 +125,15 @@ def apply_page_limit(result, processed_pages, unread_pages):
     return result
 
 
-def read_document(digest, extended=False):
+def read_document(digest, extended=False, large=False):
     if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
         raise ValueError('Некорректный SHA-256')
     source = store.DATA / 'municipal' / (digest + '.pdf')
-    if not source.is_file() or source.stat().st_size > (16 if extended else 8)*1024*1024 or hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+    if not source.is_file() or source.stat().st_size > (32 if large else 16 if extended else 8)*1024*1024 or hashlib.sha256(source.read_bytes()).hexdigest() != digest:
         raise ValueError('Сохранённый PDF отсутствует, слишком велик или изменился')
     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
     try:
-        output = subprocess.run([sys.executable, '-m', 'land.scheme_worker', str(source.resolve()), digest,*(['extended'] if extended else [])],
+        output = subprocess.run([sys.executable, '-m', 'land.scheme_worker', str(source.resolve()), digest,*(['large'] if large else ['extended'] if extended else [])],
                                 cwd=ROOT, capture_output=True, encoding='utf-8', timeout=60, **options)
     except subprocess.TimeoutExpired as exc:
         raise ValueError('Извлечение таблиц превысило время; процесс остановлен') from exc
@@ -153,7 +153,7 @@ def pending(catalog, previous, retry=False):
                       key=lambda r: (r['kind'] != 'planning', not bool(r.get('coordinate_label_pages'))))
     return [r for r in eligible if r['id'] not in prior or prior[r['id']].get('source_sha256') != r['sha256']
             or prior[r['id']].get('algorithm') != ALGORITHM or (retry and prior[r['id']]['state']=='error')
-            or (r.get('local_pdf_algorithm')=='municipal-local-pdf-v1' and prior[r['id']].get('catalog_processed_pages')!=r['processed_pages'])]
+            or (municipal.pdf_scope(r)[1]>40 and prior[r['id']].get('catalog_processed_pages')!=r['processed_pages'])]
 
 
 def persist(project, result):
@@ -186,9 +186,12 @@ def run(project, params):
             document = {'document_id':row['id'],'source_sha256':row['sha256'],'source_received_at':row['received_at'],
                         'title':row['title'],'url':row['url'],'algorithm':ALGORITHM,'processed_at':store.now(),
                         'content_conflicts':row.get('content_conflicts',[]), 'listing_conflict':row.get('listing_conflict',False)}
-            if row.get('local_pdf_algorithm')=='municipal-local-pdf-v1':document['catalog_processed_pages']=row['processed_pages']
+            if municipal.pdf_scope(row)[1]>40:document['catalog_processed_pages']=row['processed_pages']
             try:
-                document.update(read_document(row['sha256'],extended=True) if 'catalog_processed_pages' in document else read_document(row['sha256']), state='extracted')
+                details=(read_document(row['sha256'],large=True) if municipal.pdf_scope(row)[0]==32
+                         else read_document(row['sha256'],extended=True) if 'catalog_processed_pages' in document
+                         else read_document(row['sha256']))
+                document.update(details, state='extracted')
             except Exception as exc:
                 document.update(state='error', error=str(exc)[:500], tables=[])
             result['documents'] = [r for r in result['documents'] if r['document_id'] != row['id']] + [document]
