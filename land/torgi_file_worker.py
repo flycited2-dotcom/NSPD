@@ -1,4 +1,4 @@
-"""Text evidence from bounded PDF / DOCX bodies, never executable Word content."""
+"""Bounded text/image evidence, never executable Word content."""
 import hashlib
 import json
 from pathlib import Path
@@ -6,6 +6,7 @@ import sys
 from . import municipal, schemes, egrn_coordinates
 from .docx_text import docx_text, read_docx, ALGORITHM as DOCX_ALGORITHM
 from . import image_evidence
+from .legacy_text import doc_text, rtf_text, ALGORITHM as LEGACY_ALGORITHM
 
 
 def extract(raw,fmt):
@@ -15,7 +16,7 @@ def extract(raw,fmt):
                 'mentions':[],'tables':[],'geometry_confirmed':False,'georeferenced':False,
                 'text_layer_complete':False},[]
     if fmt=='pdf':
-        details,pages=municipal.pdf_text(raw)
+        details,pages=municipal.pdf_text(raw,max_bytes=16*1024*1024)
         result=schemes.apply_page_limit(schemes.extract(pages),details['processed_pages'],details['unread_pages'])
         egrn, consumed = egrn_coordinates.extract(pages)
         unparsed = [n for n,text in pages if any(schemes.PAIR.search(line) and (n,line.strip()) not in consumed
@@ -24,6 +25,12 @@ def extract(raw,fmt):
                 'unreadable_tables':result['unreadable_tables'],'crs_status':result['crs_status'],
                 'egrn_tables':egrn,'unparsed_coordinate_pages':unparsed,
                 'unit':'pdf_page','georeferenced':False},pages
+    if fmt in ('doc','rtf'):
+        text,details=(doc_text if fmt=='doc' else rtf_text)(raw)
+        evidence=municipal.evidence([(1,text)])
+        for mention in evidence['mentions']:mention['sections']=mention.pop('pages')
+        return {**evidence,**details,'unit':fmt+'_body','tables':[], 'text_layer_complete':False,'georeferenced':False,
+                'scope_note':'Прочитан основной текст '+fmt.upper()+'; страницы, оформление, скрытые/редакционные свойства, изображения и принадлежность номера лоту не восстановлены.'},[(1,text)]
     if fmt!='docx':raise ValueError('Формат не поддержан')
     text,count,details=read_docx(raw)
     # DOCX pagination cannot be recovered from body XML. Never call this a PDF page.
@@ -45,7 +52,7 @@ def main():
             png,_=image_evidence.preview(raw,fmt)
             path.with_suffix('.preview.png').write_bytes(png)
         else:path.with_suffix('.txt').write_text('\n'.join(f'UNIT {n}\n{text}' for n,text in pages),encoding='utf-8')
-        algorithm=DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else 'torgi-file-text-v2'
+        algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else 'torgi-file-text-v2'
         print(json.dumps({**result,'sha256':digest,'algorithm':algorithm},ensure_ascii=False))
     except Exception as exc:
         print(json.dumps({'error':str(exc)[:500]},ensure_ascii=False));raise SystemExit(1)

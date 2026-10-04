@@ -47,11 +47,11 @@ async def recognize(ocr, path):
             stream.close()
 
 
-async def process(path, digest, number, folder):
+async def process(path, digest, number, folder, max_pdf_mib=8):
     import pypdfium2 as pdfium
     ocr, info = engine()
     raw = path.read_bytes()
-    if len(raw) > 8 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
+    if max_pdf_mib not in (8,16) or len(raw) > max_pdf_mib * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
         raise ValueError('Размер или SHA-256 сохранённого PDF не соответствует источнику')
     doc = pdfium.PdfDocument(raw)
     try:
@@ -113,6 +113,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--pdf', type=Path)
+    parser.add_argument('--max-pdf-mib',type=int,choices=(8,16),default=8)
     parser.add_argument('--image', type=Path)
     parser.add_argument('--source-format', choices=('jpg','jpeg','png'))
     parser.add_argument('--sha256')
@@ -126,7 +127,7 @@ def main():
         else:
             args.folder.mkdir(parents=True, exist_ok=True)
             result = asyncio.run(process_image(args.image, args.sha256, args.source_format, args.folder)
-                                 if args.image else process(args.pdf, args.sha256, args.page, args.folder))
+                                 if args.image else process(args.pdf, args.sha256, args.page, args.folder,args.max_pdf_mib))
             target = args.folder / f'p{args.page}-{ALGORITHM}.json'
             target.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
             print(json.dumps({'page': args.page, 'algorithm': ALGORITHM}))

@@ -13,7 +13,7 @@ def source_path(file):
     if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest) or fmt not in ('pdf', *image_evidence.FORMATS):
         raise ValueError('Некорректный источник визуального документа')
     path = store.DATA / 'torgi_documents' / (digest + '.' + fmt)
-    if not path.is_file() or path.stat().st_size > torgi_docs.MAX_BYTES or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+    if not path.is_file() or path.stat().st_size > torgi_docs.file_limit(fmt) or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
         raise ValueError('Сохранённый источник отсутствует, слишком велик или изменился')
     return path
 
@@ -51,7 +51,7 @@ def read_unit(file, number):
     target = target_folder / f'p{number}-{ocr.ALGORITHM}.json'
     cached = target.exists()
     if not cached:
-        args = ['--pdf', str(path.resolve())] if file['format'] == 'pdf' else ['--image', str(path.resolve()), '--source-format', file['format']]
+        args = ['--pdf', str(path.resolve()), '--max-pdf-mib', '16'] if file['format'] == 'pdf' else ['--image', str(path.resolve()), '--source-format', file['format']]
         ocr.worker([*args, '--sha256', file['sha256'], '--page', str(number), '--folder', str(target_folder.resolve())], 60)
     if not target.is_file() or target.stat().st_size > 4 * 1024 * 1024:
         raise ValueError('Результат OCR отсутствует или слишком велик')

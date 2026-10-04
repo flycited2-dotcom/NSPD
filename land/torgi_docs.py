@@ -11,15 +11,29 @@ from . import store, torgi
 from .network import fetch, ResponseTooLarge
 from .docx_text import ALGORITHM as DOCX_ALGORITHM
 from . import image_evidence
+from .legacy_text import ALGORITHM as LEGACY_ALGORITHM, OLE_MAGIC
 
 CARD = 'https://torgi.gov.ru/new/api/public/lotcards/'
 FILE = 'https://torgi.gov.ru/new/file-store/v1/'
 BATCH = 5
 MAX_BYTES = 8*1024*1024
-READ_FORMATS = ('pdf','docx',*image_evidence.FORMATS)
+PDF_MAX_BYTES = 16*1024*1024
+READ_FORMATS = ('pdf','docx','doc','rtf',*image_evidence.FORMATS)
 ALGORITHM = 'torgi-file-text-v2'
 ROOT = Path(__file__).resolve().parent.parent
 WARNING = 'Файлы извещения могут относиться ко многим лотам. Номер в документе не подтверждает предмет лота, геометрию, действующие условия или доступность земли. Подписи и права не проверены.'
+
+
+def file_limit(fmt):
+    return PDF_MAX_BYTES if fmt=='pdf' else MAX_BYTES
+
+
+def validate_download(file,raw):
+    if len(raw)!=file['declared_size'] or len(raw)>file_limit(file['format']):
+        raise ValueError('Размер скачанного файла отличается от карточки или превышает лимит')
+    signature={'pdf':b'%PDF-','docx':b'PK\x03\x04','doc':OLE_MAGIC,'rtf':b'{\\rtf1',
+               'jpg':b'\xff\xd8\xff','jpeg':b'\xff\xd8\xff','png':b'\x89PNG\r\n\x1a\n'}[file['format']]
+    if not raw.startswith(signature):raise ValueError('Содержимое не соответствует формату файла')
 
 
 def descriptor(row, scope):
@@ -70,7 +84,7 @@ def files_for(cards, prior):
             versions.setdefault(attachment['file_id'],set()).add(key)
             if key not in files:
                 old=copy.deepcopy(prior.get(key) or {})
-                initial='inactive' if attachment['inactive'] else 'oversized' if attachment['declared_size']>MAX_BYTES else 'pending' if attachment['format'] in READ_FORMATS else 'unsupported'
+                initial='inactive' if attachment['inactive'] else 'oversized' if attachment['declared_size']>file_limit(attachment['format']) else 'pending' if attachment['format'] in READ_FORMATS else 'unsupported'
                 files[key]={**old,**attachment,'associations':[]}
                 files[key].setdefault('state',initial)
             f=files[key]
@@ -79,7 +93,7 @@ def files_for(cards, prior):
         file['metadata_conflict']=len(versions[file['file_id']])>1
         file['eligible']=not file['metadata_conflict'] and any(not a['inactive'] for a in file['associations'])
         if file['state']=='inactive' and file['eligible']:
-            file['state']='oversized' if file['declared_size']>MAX_BYTES else 'pending' if file['format'] in READ_FORMATS else 'unsupported'
+            file['state']='oversized' if file['declared_size']>file_limit(file['format']) else 'pending' if file['format'] in READ_FORMATS else 'unsupported'
     return files
 
 
@@ -96,7 +110,7 @@ def file_queue(result,retry=False):
         if f.get('type_code') in ('Application_Form','Draft_Contract') or any(x in name for x in ('квитанц','задат','договор','заявк')):return 3
         return 2
     return sorted((f for f in result.get('files',{}).values() if f.get('eligible') and (f['state']=='pending' or (retry and f['state']=='error')
-                  or (f['state']=='unsupported' and f['format'] in image_evidence.FORMATS and f['declared_size']<=MAX_BYTES))),
+                  or (f['state'] in ('unsupported','oversized') and f['format'] in READ_FORMATS and f['declared_size']<=file_limit(f['format'])))),
                   key=lambda f: (0 if retry and f['state']=='error' else 1, priority(f)))
 
 
@@ -111,9 +125,12 @@ def persist(project,result):
 def reprocess_queue(result):
     def outdated(file):
         if file['state']=='read' and file.get('format')=='pdf':return file.get('algorithm')!=ALGORITHM
-        return (file['state']=='rejected' and file.get('format')=='docx' and file.get('eligible')
-                and file.get('error')=='Основной XML DOCX превышает лимит' and file.get('sha256')
-                and file.get('reprocess_algorithm')!=DOCX_ALGORITHM)
+        if file['state']!='rejected' or not file.get('eligible') or not file.get('sha256'):return False
+        if file.get('format')=='docx':
+            return (file.get('error')=='Основной XML DOCX превышает лимит'
+                    and file.get('reprocess_algorithm')!=DOCX_ALGORITHM)
+        return (file.get('format')=='rtf' and file.get('error')=='Регистр управляющего слова RTF не поддержан'
+                and file.get('reprocess_algorithm')!=LEGACY_ALGORITHM)
     return [f for f in result.get('files',{}).values() if outdated(f)]
 
 
@@ -127,13 +144,13 @@ def reprocess(project,params):
     store.set_setting('torgi_reprocess_attempt_'+project,attempt)
     try:
         for file in selected:
-            fmt=file['format'];algorithm=DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
+            fmt=file['format'];algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
             try:
                 digest=file.get('sha256')
                 if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
                     raise ValueError('Некорректный SHA-256 сохранённого файла')
                 path=store.DATA/'torgi_documents'/(digest+'.'+fmt)
-                if not path.is_file() or path.stat().st_size>MAX_BYTES or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
+                if not path.is_file() or path.stat().st_size>file_limit(fmt) or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
                     raise ValueError('Сохранённый файл отсутствует, слишком велик или изменился')
                 file.update(extract_file(path,digest,fmt),state='read',reprocessed_at=store.now(),geometry_confirmed=False,
                             reprocess_algorithm=algorithm)
@@ -208,7 +225,7 @@ def extract_file(path,digest,fmt):
     if len(r.stdout)>4*1024*1024:raise ValueError('Результат чтения превышает лимит')
     result=json.loads(r.stdout)
     if r.returncode or result.get('error'):raise ValueError(result.get('error') or 'Ошибка чтения файла')
-    algorithm=DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else ALGORITHM
+    algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else ALGORITHM
     if result.get('sha256')!=digest or result.get('algorithm')!=algorithm:raise ValueError('Чтение относится к другому файлу')
     return result
 
@@ -221,14 +238,27 @@ def read(project,params):
     retry=params.get('retry_errors',False)
     if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
     result=copy.deepcopy(old);selected=file_queue(result,retry)[:BATCH]
-    attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected)}
+    attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0,'cached_files':0}
     store.set_setting('torgi_files_attempt_'+project,attempt)
     folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
     try:
         for file in selected:
             attempt['file_key']=file['key'];store.set_setting('torgi_files_attempt_'+project,attempt)
             try:
-                raw,ct,code=fetch(FILE+file['file_id'],max_bytes=MAX_BYTES)
+                digest=file.get('sha256')
+                cached=folder/(digest+'.'+file['format']) if isinstance(digest,str) and re.fullmatch(r'[0-9a-f]{64}',digest) else None
+                if cached and file.get('received_at'):
+                    if not cached.is_file():raise ValueError('Сохранённый файл отсутствует; чтение остановлено')
+                    if cached.stat().st_size>file_limit(file['format']):raise ValueError('Сохранённый файл превышает лимит')
+                    raw=cached.read_bytes()
+                    if hashlib.sha256(raw).hexdigest()!=digest:raise ValueError('Сохранённый файл изменился; чтение остановлено')
+                    validate_download(file,raw)
+                    ct,code=file.get('content_type',''),file.get('http_status',200)
+                    attempt['cached_files']+=1
+                else:
+                    attempt['network_requests']=attempt.get('network_requests',0)+1
+                    raw,ct,code=fetch(FILE+file['file_id'],max_bytes=file_limit(file['format']))
+                    file.update(received_at=store.now(),sha256=hashlib.sha256(raw).hexdigest(),http_status=code,content_type=ct,actual_size=len(raw))
             except ResponseTooLarge as exc:
                 file.update(state='rejected',error=str(exc)[:500],checked_at=store.now())
                 attempt['processed']+=1;persist(project,result);continue
@@ -236,11 +266,8 @@ def read(project,params):
                 file.update(state='error',error=str(exc)[:500],checked_at=store.now())
                 attempt.update(state='partial',error=str(exc)[:500]);break
             digest=hashlib.sha256(raw).hexdigest();path=folder/(digest+'.'+file['format'])
-            file.update(received_at=store.now(),sha256=digest,http_status=code,content_type=ct,actual_size=len(raw))
             try:
-                if len(raw)!=file['declared_size']:raise ValueError('Размер скачанного файла отличается от карточки')
-                signature={'pdf':b'%PDF-','docx':b'PK\x03\x04','jpg':b'\xff\xd8\xff','jpeg':b'\xff\xd8\xff','png':b'\x89PNG\r\n\x1a\n'}[file['format']]
-                if not raw.startswith(signature):raise ValueError('Содержимое не соответствует формату файла')
+                validate_download(file,raw)
                 path.write_bytes(raw)
                 file.update(extract_file(path,digest,file['format']),state='read',geometry_confirmed=False)
                 file.pop('error',None)
@@ -250,8 +277,10 @@ def read(project,params):
         persist(project,result)
         if attempt['state']=='running':attempt['state']='done'
         attempt.update(finished_at=store.now(),remaining=len(file_queue(result)))
-        with store.connect() as db:store.event(db,project,'torgi_files',{'id':result['id'],'files':attempt['processed'],'state':attempt['state']})
-        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'state':attempt['state']}
+        with store.connect() as db:store.event(db,project,'torgi_files',{'id':result['id'],'files':attempt['processed'],'state':attempt['state'],
+                                                                  'network_requests':attempt['network_requests'],'cached_files':attempt['cached_files']})
+        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'state':attempt['state'],
+                'network_requests':attempt['network_requests'],'cached_files':attempt['cached_files']}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
     finally:store.set_setting('torgi_files_attempt_'+project,attempt)

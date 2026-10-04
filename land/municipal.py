@@ -90,9 +90,11 @@ def evidence(pages):
             'coordinate_label_pages': coordinate_pages, 'crs_mentions': crs_mentions, 'geometry_confirmed': False}
 
 
-def pdf_text(raw):
-    if not raw.startswith(b'%PDF-') or len(raw) > 8 * 1024 * 1024:
-        raise ValueError('Ожидался PDF не более 8 МБ')
+def pdf_text(raw, max_bytes=8 * 1024 * 1024):
+    if max_bytes not in (8 * 1024 * 1024,16 * 1024 * 1024):
+        raise ValueError('Недопустимый лимит PDF')
+    if not raw.startswith(b'%PDF-') or len(raw) > max_bytes:
+        raise ValueError(f'Ожидался PDF не более {max_bytes // (1024 * 1024)} МБ')
     reader = PdfReader(io.BytesIO(raw))
     if reader.is_encrypted:
         raise ValueError('Зашифрованный PDF не читается')

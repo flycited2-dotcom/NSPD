@@ -60,7 +60,7 @@ def test_pdf_worker_reports_egrn_and_leaves_other_coordinate_pages_visible(monke
     from land import torgi_file_worker,municipal
     p=pages()+[(10,'Другой формат координат\nн1 4990000.0 4330000.0\n')]
     details=dict(municipal.evidence(p),processed_pages=10,total_pages=10,unread_pages=0)
-    monkeypatch.setattr(municipal,'pdf_text',lambda raw:(details,p))
+    monkeypatch.setattr(municipal,'pdf_text',lambda raw,**kwargs:(details,p))
     result,_=torgi_file_worker.extract(b'local','pdf')
     assert len(result['egrn_tables'])==1 and result['egrn_tables'][0]['state']=='review_required'
     assert result['unparsed_coordinate_pages']==[10] and not result['georeferenced']
