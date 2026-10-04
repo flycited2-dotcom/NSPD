@@ -47,7 +47,7 @@ async def recognize(ocr, path):
             stream.close()
 
 
-async def process(path, digest, number, folder, max_pdf_mib=8):
+async def process(path, digest, number, folder, max_pdf_mib=8, max_pdf_pages=40):
     import pypdfium2 as pdfium
     ocr, info = engine()
     raw = path.read_bytes()
@@ -55,8 +55,8 @@ async def process(path, digest, number, folder, max_pdf_mib=8):
         raise ValueError('Размер или SHA-256 сохранённого PDF не соответствует источнику')
     doc = pdfium.PdfDocument(raw)
     try:
-        if not 1 <= number <= min(len(doc), 40):
-            raise ValueError('Страница вне разрешённых границ 1–40')
+        if max_pdf_pages not in (40,120) or not 1 <= number <= min(len(doc), max_pdf_pages):
+            raise ValueError(f'Страница вне разрешённых границ 1–{max_pdf_pages}')
         page = doc[number - 1]
         try:
             width, height = page.get_size()
@@ -114,6 +114,7 @@ def main():
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--pdf', type=Path)
     parser.add_argument('--max-pdf-mib',type=int,choices=(8,16),default=8)
+    parser.add_argument('--max-pdf-pages',type=int,choices=(40,120),default=40)
     parser.add_argument('--image', type=Path)
     parser.add_argument('--source-format', choices=('jpg','jpeg','png'))
     parser.add_argument('--sha256')
@@ -127,7 +128,7 @@ def main():
         else:
             args.folder.mkdir(parents=True, exist_ok=True)
             result = asyncio.run(process_image(args.image, args.sha256, args.source_format, args.folder)
-                                 if args.image else process(args.pdf, args.sha256, args.page, args.folder,args.max_pdf_mib))
+                                 if args.image else process(args.pdf, args.sha256, args.page, args.folder,args.max_pdf_mib,args.max_pdf_pages))
             target = args.folder / f'p{args.page}-{ALGORITHM}.json'
             target.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
             print(json.dumps({'page': args.page, 'algorithm': ALGORITHM}))

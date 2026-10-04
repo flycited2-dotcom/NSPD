@@ -62,13 +62,14 @@ def summarize(data):
             'sparse': any(len(''.join(v['text'].split())) < 20 for v in data['views']), 'confidence_available': False}
 
 
-def read_page(digest, number):
+def read_page(digest, number, max_pdf_mib=8, max_pdf_pages=40):
     folder = page_folder(digest)
     target = folder / f'p{number}-{ALGORITHM}.json'
     cached = target.exists()
     if not cached:
         path = store.DATA / 'municipal' / (digest + '.pdf')
-        worker(['--pdf', str(path.resolve()), '--sha256', digest, '--page', str(number), '--folder', str(folder.resolve())], 60)
+        worker(['--pdf', str(path.resolve()), '--sha256', digest, '--page', str(number), '--folder', str(folder.resolve()),
+                '--max-pdf-mib',str(max_pdf_mib),'--max-pdf-pages',str(max_pdf_pages)], 60)
     data = json.loads(target.read_text(encoding='utf-8'))
     if data.get('source_sha256') != digest or data.get('page') != number:
         raise ValueError('OCR относится к другому документу или странице')
@@ -91,7 +92,8 @@ def queue(result, retry=False):
         prior = row.get('ocr') or {}
         pages = {p['page']: p for p in prior.get('pages', [])} if prior.get('source_sha256') == row['sha256'] else {}
         for n in sorted(set(row.get('image_or_sparse_pages', []))):
-            if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= min(row['processed_pages'], 40):
+            limit=120 if row.get('local_pdf_algorithm')=='municipal-local-pdf-v1' else 40
+            if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= min(row['processed_pages'], limit):
                 raise ValueError('Недопустимая страница OCR')
             old = pages.get(n)
             if not old or old.get('algorithm') != ALGORITHM or (retry and old['state'] == 'error'):
@@ -119,7 +121,8 @@ def run(project, params):
             digest = row['sha256']
             page_folder(digest)
             source = store.DATA / 'municipal' / (digest + '.pdf')
-            if not source.is_file() or source.stat().st_size > 8 * 1024 * 1024 or hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+            max_mib=16 if row.get('local_pdf_algorithm')=='municipal-local-pdf-v1' else 8
+            if not source.is_file() or source.stat().st_size > max_mib * 1024 * 1024 or hashlib.sha256(source.read_bytes()).hexdigest() != digest:
                 raise ValueError('Сохранённый PDF отсутствует, слишком велик или изменился; OCR остановлен')
             attempt.update(document_id=row['id'], page=number)
             store.set_setting('municipal_ocr_attempt_' + project, attempt)
@@ -127,7 +130,7 @@ def run(project, params):
             if prior.get('source_sha256') != digest:
                 prior = {'source_sha256': digest, 'pages': [], 'verification_required': True}
             try:
-                observation = read_page(digest, number)
+                observation = read_page(digest, number,max_mib,120) if max_mib==16 else read_page(digest, number)
             except Exception as exc:
                 observation = {'page': number, 'state': 'error', 'processed_at': store.now(), 'algorithm': ALGORITHM, 'error': str(exc)[:500]}
             prior['pages'] = sorted([p for p in prior['pages'] if p['page'] != number] + [observation], key=lambda p: p['page'])

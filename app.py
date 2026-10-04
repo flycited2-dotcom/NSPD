@@ -23,6 +23,7 @@ from land import survey
 from land import publications
 from land import torgi
 from land import municipal
+from land import municipal_local
 from land import ocr
 from land import schemes
 from land import torgi_docs
@@ -164,13 +165,17 @@ class Handler(BaseHTTPRequestHandler):
                 result = store.get_setting('municipal_' + project, None)
                 attempt = store.get_setting('municipal_attempt_' + project, None)
                 ocr_attempt = store.get_setting('municipal_ocr_attempt_' + project, None)
+                local_attempt = store.get_setting('municipal_local_attempt_' + project, None)
                 with JOB_LOCK:
                     active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
                 if attempt and attempt['state'] == 'running' and not active:
                     attempt = dict(attempt, state='interrupted')
                 if ocr_attempt and ocr_attempt['state'] == 'running' and not active:
                     ocr_attempt = dict(ocr_attempt, state='interrupted')
+                if local_attempt and local_attempt['state']=='running' and not active:
+                    local_attempt=dict(local_attempt,state='interrupted')
                 return self.send({'result': result, 'attempt': attempt, 'ocr_attempt': ocr_attempt,
+                                  'local_attempt':local_attempt,'local_remaining':len(municipal_local.queue(result)),
                                   'current_survey_id': (store.get_setting('survey_' + project, {}) or {}).get('id')},
                                  filename='municipal-evidence.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/publications', '/api/publications/export'):
@@ -274,6 +279,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Каталог муниципальных документов', lambda: municipal.catalog(project)))
             if path == '/api/municipal/read':
                 return self.send(launch_job(project, 'Чтение муниципальных документов', lambda: municipal.read(project, data)))
+            if path == '/api/municipal/local':
+                return self.send(launch_job(project,'Перечтение сохранённых муниципальных PDF',lambda:municipal_local.run(project,data)))
             if path == '/api/municipal/ocr':
                 return self.send(launch_job(project, 'Локальное распознавание сканов', lambda: ocr.run(project, data)))
             if path == '/api/schemes':

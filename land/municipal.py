@@ -90,9 +90,11 @@ def evidence(pages):
             'coordinate_label_pages': coordinate_pages, 'crs_mentions': crs_mentions, 'geometry_confirmed': False}
 
 
-def pdf_text(raw, max_bytes=8 * 1024 * 1024):
+def pdf_text(raw, max_bytes=8 * 1024 * 1024, max_pages=None):
     if max_bytes not in (8 * 1024 * 1024,16 * 1024 * 1024):
         raise ValueError('Недопустимый лимит PDF')
+    if max_pages is not None and max_pages not in (40,120):raise ValueError('Недопустимый лимит страниц PDF')
+    limit=MAX_PAGES if max_pages is None else max_pages
     if not raw.startswith(b'%PDF-') or len(raw) > max_bytes:
         raise ValueError(f'Ожидался PDF не более {max_bytes // (1024 * 1024)} МБ')
     reader = PdfReader(io.BytesIO(raw))
@@ -102,7 +104,7 @@ def pdf_text(raw, max_bytes=8 * 1024 * 1024):
     if not count:
         raise ValueError('PDF без страниц')
     pages, image_pages = [], []
-    for i in range(min(count, MAX_PAGES)):
+    for i in range(min(count, limit)):
         page = reader.pages[i]
         stream = page.get_contents()
         if stream and len(stream.get_data()) > 8 * 1024 * 1024:

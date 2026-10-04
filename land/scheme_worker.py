@@ -13,7 +13,8 @@ def main():
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != digest:
             raise ValueError('SHA-256 PDF изменился')
-        details, pages = municipal.pdf_text(raw)
+        extended=len(sys.argv)>3 and sys.argv[3]=='extended'
+        details, pages = municipal.pdf_text(raw,max_bytes=(16 if extended else 8)*1024*1024,max_pages=120 if extended else 40)
         result = schemes.apply_page_limit(schemes.extract(pages), details['processed_pages'], details['unread_pages'])
         result.update(source_sha256=digest, processed_pages=details['processed_pages'], total_pages=details['total_pages'],
                       unread_pages=details['unread_pages'], image_or_sparse_pages=details['image_or_sparse_pages'])

@@ -30,6 +30,17 @@ def request(server, path, data=None, token=True):
     return urllib.request.urlopen(req, timeout=10)
 
 
+def test_municipal_local_export_and_protected_endpoint(server):
+    store.set_setting('municipal_trudovoe',{'id':'m1','items':[]})
+    store.set_setting('municipal_local_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/municipal/export?project=trudovoe') as r:
+        data=json.load(r)
+    assert data['local_remaining']==0 and data['local_attempt']['state']=='interrupted'
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(server,'/api/municipal/local',{'project':'trudovoe','id':'m1'},token=False)
+    assert error.value.code==403
+
+
 def test_http_demo_dossier_and_export(server):
     with request(server,'/api/demo',{'project':'demo'}) as r:
         assert json.load(r)['count'] > 0
