@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
-from . import municipal, schemes
+from . import municipal, schemes, scheme_catalogs
 
 
 def main():
@@ -19,6 +19,12 @@ def main():
             raise ValueError('SHA-256 PDF изменился')
         details, pages = municipal.pdf_text(raw,max_bytes=max_mib*1024*1024,max_pages={'standard':40,'extended':120,'large':200}[mode])
         result = schemes.apply_page_limit(schemes.extract(pages), details['processed_pages'], details['unread_pages'])
+        try:
+            result.update(scheme_catalogs.extract_pdf(path,details['processed_pages']))
+            covered=set(result['catalogue_covered_coordinate_pages'])
+            result['unparsed_coordinate_pages']=[n for n in result['unparsed_coordinate_pages'] if n not in covered]
+        except Exception as exc:
+            result.update(coordinate_catalogs=[],catalogue_covered_coordinate_pages=[],coordinate_catalog_error=str(exc)[:500])
         result.update(source_sha256=digest, processed_pages=details['processed_pages'], total_pages=details['total_pages'],
                       unread_pages=details['unread_pages'], image_or_sparse_pages=details['image_or_sparse_pages'])
         print(json.dumps(result, ensure_ascii=False))

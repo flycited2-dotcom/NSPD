@@ -10,7 +10,7 @@ from shapely.geometry import Polygon
 from shapely.validation import explain_validity
 from . import municipal, store, scheme_review, scheme_components
 
-ALGORITHM = 'designation-components-v3.1'
+ALGORITHM = 'designation-catalogues-v4'
 BATCH = 5
 ROOT = Path(__file__).resolve().parent.parent
 DESIGNATION = re.compile(r'Обозначение земельного\s+участка\s+(:ЗУ\d+|\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10}(?:\(\d+\))?)', re.I)
@@ -160,7 +160,7 @@ def pending(catalog, previous, retry=False):
     eligible = sorted((r for r in catalog['items'] if r['state']=='read' and r['format']=='pdf'),
                       key=lambda r: (r['kind'] != 'planning', not bool(r.get('coordinate_label_pages'))))
     return [r for r in eligible if r['id'] not in prior or prior[r['id']].get('source_sha256') != r['sha256']
-            or prior[r['id']].get('algorithm') != ALGORITHM or (retry and prior[r['id']]['state']=='error')
+            or prior[r['id']].get('algorithm') != ALGORITHM or (retry and (prior[r['id']]['state']=='error' or prior[r['id']].get('coordinate_catalog_error')))
             or (municipal.pdf_scope(r)[1]>40 and prior[r['id']].get('catalog_processed_pages')!=r['processed_pages'])]
 
 
