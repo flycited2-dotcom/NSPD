@@ -27,6 +27,7 @@ from land import municipal_local
 from land import municipal_large
 from land import ocr
 from land import schemes
+from land import scan_tables
 from land import torgi_docs
 from land import georeference
 from land import torgi_visual
@@ -131,6 +132,15 @@ class Handler(BaseHTTPRequestHandler):
                 remaining = len(schemes.pending(catalog, result or {})) if catalog else 0
                 return self.send({'result':result, 'attempt':attempt, 'current_catalog_id':catalog.get('id'), 'remaining':remaining},
                                  filename='scheme-coordinates.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/scan-tables','/api/scan-tables/export'):
+                catalog=store.get_setting('municipal_'+project) or {}
+                attempt=store.get_setting('scan_tables_attempt_'+project)
+                with JOB_LOCK:
+                    active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
+                if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
+                return self.send({'result':store.get_setting('scan_tables_'+project),'attempt':attempt,
+                                  'choices':scan_tables.choices(catalog),'current_catalog_id':catalog.get('id')},
+                                 filename='scan-table-drafts.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/georeference','/api/georeference/export'):
                 result=store.get_setting('georeference_'+project)
                 attempt=store.get_setting('georeference_attempt_'+project)
@@ -293,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Локальное распознавание сканов', lambda: ocr.run(project, data)))
             if path == '/api/schemes':
                 return self.send(launch_job(project, 'Извлечение таблиц координат', lambda: schemes.run(project, data)))
+            if path == '/api/scan-tables':
+                return self.send(launch_job(project, 'Строки координат из выбранного скана', lambda: scan_tables.run(project, data)))
             if path == '/api/georeference':
                 return self.send(launch_job(project, 'Проверка предварительной геопривязки', lambda: georeference.run(project,data)))
             if path == '/api/torgi/documents':

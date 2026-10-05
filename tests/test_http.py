@@ -53,6 +53,21 @@ def test_municipal_large_export_and_protected_endpoint(server):
     assert error.value.code==403
 
 
+def test_scan_drafts_export_keeps_stale_source_and_protects_mutation(server):
+    store.set_setting('municipal_trudovoe',{'id':'current','items':[]})
+    store.set_setting('scan_tables_trudovoe',{'catalog_id':'old','pages':[],'geometry_confirmed':False})
+    store.set_setting('scan_tables_attempt_trudovoe',{'state':'running','network_requests':0})
+    with request(server,'/api/scan-tables/export') as r:
+        body=json.load(r)
+        assert 'scan-table-drafts.json' in r.headers['Content-Disposition']
+        assert body['result']['catalog_id']=='old' and body['current_catalog_id']=='current'
+        assert body['choices']==[] and body['attempt']['state']=='interrupted'
+        assert not body['result']['geometry_confirmed']
+    with pytest.raises(urllib.error.HTTPError) as error:
+        request(server,'/api/scan-tables',{'catalog_id':'current','document_id':'unknown','page':1},token=False)
+    assert error.value.code==403
+
+
 def test_http_demo_dossier_and_export(server):
     with request(server,'/api/demo',{'project':'demo'}) as r:
         assert json.load(r)['count'] > 0

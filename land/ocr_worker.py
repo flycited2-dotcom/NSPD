@@ -24,7 +24,7 @@ def engine():
                    'max_image_dimension': OcrEngine.max_image_dimension, 'confidence_available': False}
 
 
-async def recognize(ocr, path):
+async def recognize(ocr, path, word_boxes=False):
     from winrt.windows.storage import StorageFile, FileAccessMode
     from winrt.windows.graphics.imaging import BitmapDecoder
     stream = bitmap = None
@@ -38,8 +38,17 @@ async def recognize(ocr, path):
         text = '\n'.join(lines)
         if len(text) > 500000:
             raise ValueError('Распознанный текст превышает лимит')
-        return {'text': text, 'line_count': len(lines), 'characters': len(text),
+        data = {'text': text, 'line_count': len(lines), 'characters': len(text),
                 'text_angle': result.text_angle, 'width': bitmap.pixel_width, 'height': bitmap.pixel_height}
+        if word_boxes:
+            words=[]
+            for li,line in enumerate(result.lines):
+                for wi,word in enumerate(line.words):
+                    b=word.bounding_rect
+                    words.append({'text':word.text,'line':li,'word':wi,'bbox':[b.x,b.y,b.width,b.height]})
+                    if len(words)>10000:raise ValueError('OCR превышает лимит слов страницы')
+            data['words']=words
+        return data
     finally:
         if bitmap is not None:
             bitmap.close()

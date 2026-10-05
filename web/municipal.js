@@ -21,6 +21,7 @@ async function refreshMunicipal(){
  const pages=r.items.flatMap(x=>x.ocr&&x.ocr.source_sha256===x.sha256?x.ocr.pages:[]),eligible=r.items.filter(x=>x.state==='read'&&x.format==='pdf').reduce((n,x)=>n+(x.image_or_sparse_pages?.length||0),0);
  el('municipal-ocr-status').textContent=`OCR сохранённых сканов: ${pages.filter(p=>p.state==='received').length} страниц получено, ${pages.filter(p=>p.state==='error').length} ошибок; ещё не обработано: ${Math.max(0,eligible-pages.length)}. Новые запросы к сайтам не выполняются. Совпадение двух чтений требует сверки с изображением.${o?.state==='running'?' Обработка порции: '+o.processed+' / '+o.requested:''}${o?.state==='error'?' Не завершено: '+o.error:''}${o?.state==='interrupted'?' Последняя попытка прервана.':''}`;
  el('municipal-export').classList.remove('hidden');municipalTable();
+ if(typeof refreshScanTables==='function')await refreshScanTables();
 }
 async function runMunicipal(read=false,ocr=false,local=false,large=false){
  if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
