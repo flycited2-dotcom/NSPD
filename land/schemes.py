@@ -8,9 +8,9 @@ import subprocess
 import sys
 from shapely.geometry import Polygon
 from shapely.validation import explain_validity
-from . import municipal, store, scheme_review
+from . import municipal, store, scheme_review, scheme_components
 
-ALGORITHM = 'designation-xy-v2'
+ALGORITHM = 'designation-components-v3.1'
 BATCH = 5
 ROOT = Path(__file__).resolve().parent.parent
 DESIGNATION = re.compile(r'Обозначение земельного\s+участка\s+(:ЗУ\d+|\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10}(?:\(\d+\))?)', re.I)
@@ -91,6 +91,10 @@ def extract(pages):
                        'georeferenced': False, 'geometry_confirmed': False})
         if len(tables) > 200 or sum(len(t['points']) for t in tables) > 5000:
             raise ValueError('Количество таблиц/точек превышает лимит')
+    components,boundaries,component_covered=scheme_components.extract(text,page_at)
+    tables.extend(components); covered.update(component_covered)
+    if len(tables)>200 or sum(len(t['points']) for t in tables)>5000:
+        raise ValueError('Количество таблиц/точек превышает лимит')
     labels = {}
     for table in tables:
         labels.setdefault(table['label'], []).append(table)
@@ -107,8 +111,11 @@ def extract(pages):
             unparsed.add(page_at(cursor))
         cursor += len(line)
     crs = municipal.evidence(pages)['crs_mentions']
+    crs += [{'page':t['heading_page'],'label':t['crs_label']} for t in components if t.get('crs_label')]
+    crs=list({(r['page'],r['label']):r for r in crs}.values())
     names = {re.sub(r'[\s-]+', '', x['label']).upper() for x in crs}
-    return {'algorithm': ALGORITHM, 'tables': tables, 'unparsed_coordinate_pages': sorted(unparsed), 'unreadable_tables':issues,
+    return {'algorithm': ALGORITHM, 'tables': tables, 'component_groups':scheme_components.groups(tables),
+            'project_boundaries':boundaries,'unparsed_coordinate_pages': sorted(unparsed), 'unreadable_tables':issues,
             'crs_mentions': crs, 'crs_status': 'ambiguous_labels' if len(names)>1 else 'parameters_missing' if names else 'label_missing',
             'georeferenced': False, 'geometry_confirmed': False, 'warning': WARNING,
             'review': scheme_review.build(tables, scheme_review.context(pages))}
@@ -122,6 +129,7 @@ def apply_page_limit(result, processed_pages, unread_pages):
                 table.update(state='rejected', outline_xy=None, local_area_m2=None)
     result['review'] = scheme_review.build(result['tables'], {
         key:result['review'][key] for key in ('origin_statements','division_statements','quarter_statements')})
+    result['component_groups']=scheme_components.groups(result['tables'])
     return result
 
 
