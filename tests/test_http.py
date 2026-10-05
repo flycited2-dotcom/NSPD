@@ -68,6 +68,20 @@ def test_scan_drafts_export_keeps_stale_source_and_protects_mutation(server):
     assert error.value.code==403
 
 
+def test_scan_cells_and_review_export_and_write_guards(server):
+    store.set_setting('municipal_trudovoe',{'id':'current','items':[]})
+    store.set_setting('scan_cells_trudovoe',{'rows':[],'id':'cells'})
+    store.set_setting('scan_reviews_trudovoe',{'tables':[],'id':'reviews'})
+    store.set_setting('scan_cells_attempt_trudovoe',{'state':'running','network_requests':0})
+    with request(server,'/api/scan-tables/export') as r:
+        body=json.load(r)
+    assert body['cells']['id']=='cells' and body['reviews']['id']=='reviews'
+    assert body['cells_attempt']['state']=='interrupted' and body['page_fingerprints']==[]
+    for path in ('/api/scan-tables/cells','/api/scan-tables/review'):
+        with pytest.raises(urllib.error.HTTPError) as error:request(server,path,{'draft_id':'old'},token=False)
+        assert error.value.code==403
+
+
 def test_http_demo_dossier_and_export(server):
     with request(server,'/api/demo',{'project':'demo'}) as r:
         assert json.load(r)['count'] > 0

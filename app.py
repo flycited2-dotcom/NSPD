@@ -28,6 +28,7 @@ from land import municipal_large
 from land import ocr
 from land import schemes
 from land import scan_tables
+from land import scan_cells,scan_source,scan_review
 from land import torgi_docs
 from land import georeference
 from land import torgi_visual
@@ -135,11 +136,15 @@ class Handler(BaseHTTPRequestHandler):
             if p.path in ('/api/scan-tables','/api/scan-tables/export'):
                 catalog=store.get_setting('municipal_'+project) or {}
                 attempt=store.get_setting('scan_tables_attempt_'+project)
+                cells_attempt=store.get_setting('scan_cells_attempt_'+project)
                 with JOB_LOCK:
                     active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
                 if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
-                return self.send({'result':store.get_setting('scan_tables_'+project),'attempt':attempt,
-                                  'choices':scan_tables.choices(catalog),'current_catalog_id':catalog.get('id')},
+                if cells_attempt and cells_attempt['state']=='running' and not active:cells_attempt=dict(cells_attempt,state='interrupted')
+                drafts=store.get_setting('scan_tables_'+project);choices=scan_tables.choices(catalog)
+                return self.send({'result':drafts,'attempt':attempt,'cells':store.get_setting('scan_cells_'+project),
+                                  'cells_attempt':cells_attempt,'reviews':scan_review.present(store.get_setting('scan_reviews_'+project),drafts,choices,catalog.get('id')),
+                                  'page_fingerprints':scan_source.fingerprints(drafts),'choices':choices,'current_catalog_id':catalog.get('id')},
                                  filename='scan-table-drafts.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/georeference','/api/georeference/export'):
                 result=store.get_setting('georeference_'+project)
@@ -305,6 +310,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Извлечение таблиц координат', lambda: schemes.run(project, data)))
             if path == '/api/scan-tables':
                 return self.send(launch_job(project, 'Строки координат из выбранного скана', lambda: scan_tables.run(project, data)))
+            if path == '/api/scan-tables/cells':
+                return self.send(launch_job(project,'Прицельное чтение ячеек скана',lambda:scan_cells.run(project,data)))
+            if path == '/api/scan-tables/review':
+                return self.send(launch_job(project,'Сохранение визуальной сверки таблицы',lambda:scan_review.run(project,data)))
             if path == '/api/georeference':
                 return self.send(launch_job(project, 'Проверка предварительной геопривязки', lambda: georeference.run(project,data)))
             if path == '/api/torgi/documents':

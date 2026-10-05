@@ -1,0 +1,32 @@
+let scanExtras={};
+function scanFingerprint(p){return scanExtras.page_fingerprints?.find(x=>x.document_id===p.document_id&&x.page===p.page)?.fingerprint;}
+function scanCellRecord(p,t,r){return scanExtras.cells?.rows.find(x=>x.document_id===p.document_id&&x.page===p.page&&x.table===t.ordinal&&x.row===r.ordinal&&x.fingerprint===scanFingerprint(p));}
+function scanCellInfo(p,t,r){const c=scanCellRecord(p,t,r);return c?'<br><b>Прицельное OCR:</b><br>'+c.views.map(v=>escapeHtml(v.cells.map(x=>x.text||'∅').join(' | '))).join('<br>')+'<br>'+escapeHtml(c.issues.join('; ')||'Чтения ячеек совпали; нужна визуальная сверка'):'';}
+function scanSavedReview(p,t){return scanExtras.reviews?.tables.find(x=>x.document_id===p.document_id&&x.page===p.page&&x.table===t.ordinal);}
+function scanReviewInfo(p,t){
+ const s=scanSavedReview(p,t);if(!s)return '';
+ return `<details data-scan-open="${p.document_id}-${p.page}-${t.ordinal}-review"><summary>Сохранённая визуальная сверка · ${escapeHtml(s.label)} · ${s.stale?'устарела':s.state==='rejected'?'контур отклонён':'исходный контур для проверки'}</summary><p>Сверил: ${escapeHtml(s.reviewer)} · ${s.reviewer_kind==='assistant'?'ассистент':'человек'} · ${escapeHtml(s.reviewed_at)}. Исправлений в истории: ${s.history.length}.</p><p>${escapeHtml(s.warning)}</p>${s.stale?'<p>Источник или строки изменились. Прежние значения сохранены; контур скрыт до новой сверки.</p>':''}<p>${s.axes==='xy_m'?'X/Y и метры отмечены при визуальной сверке заголовка.':'Оси/единицы не подтверждены; площадь в м² не вычисляется.'} СК по сверке: ${escapeHtml(s.crs_label||'не указана')}; параметры не подтверждены.</p>${s.stated_area_m2!=null?'<p>Площадь по источнику: '+schemeNumber(s.stated_area_m2)+' м².</p>':''}${s.local_area_m2!=null?'<p>По сверенным числам: '+schemeNumber(s.local_area_m2)+' м².</p>':''}${s.stated_area_disagrees&&!s.stale?'<p>Расхождение площади выходит за округление указанного числа. Это подсказка для повторной сверки, не нормативный критерий точности.</p>':''}${s.issues.map(escapeHtml).join('<br>')}${cataloguePreview(s)}<details><summary>Сохранённые строки сверки</summary><pre style="overflow:auto">${s.points.map(x=>x.transcribed_cells.map(escapeHtml).join(' ')).join('\n')}</pre></details></details>`;
+}
+function scanEditReview(pi,ti){
+ const p=scanDrafts.pages[pi],t=p.tables[ti],s=scanSavedReview(p,t);
+ const rows=s&&!s.stale?s.points.map(x=>x.transcribed_cells.join(' ')):t.rows.map(r=>{
+  const c=scanCellRecord(p,t,r),values=c?.values||r.values;
+  return [0,1,2].map(i=>values[0][i]!=null&&values[0][i]===values[1][i]?String(values[0][i]):'?').join(' ');
+ });
+ el('scan-review-editor').innerHTML=`<h3>Визуальная сверка · страница ${p.page} · таблица ${t.ordinal}</h3><p>Сопоставьте каждую строку с изображением, включая замыкающую точку. Введите три столбца: точка, столбец 1, столбец 2. «?» означает, что OCR не дал согласованного значения. Значения и история сохраняются отдельно от OCR.</p><form id="scan-review-form"><div class="form-grid"><label>Обозначение по заголовку<input id="scan-review-label" maxlength="100" value="${escapeHtml(s?.label||'')}"></label><label>Площадь по источнику, м²<input id="scan-review-area" value="${escapeHtml(s?.stated_area_text||'')}"></label><label>Оси и единицы<select id="scan-review-axes"><option value="unconfirmed">Не подтверждены</option><option value="xy_m">В заголовке прямо указаны X/Y и метры</option></select></label><label>СК дословно по заголовку<input id="scan-review-crs" maxlength="200" value="${escapeHtml(s?.crs_label||'')}"></label><label>Сверку выполнил<input id="scan-review-author" maxlength="100" required value="${escapeHtml(s?.reviewer||'')}"></label><label>Автор сверки<select id="scan-review-kind"><option value="person">Человек</option><option value="assistant">Ассистент</option></select></label></div><label>Сверенные строки, включая явное замыкание<textarea id="scan-review-rows" rows="${Math.min(14,rows.length+1)}" style="width:100%;font-family:monospace">${escapeHtml(rows.join('\n'))}</textarea></label><label><input id="scan-review-confirm" type="checkbox" required> Визуально сверены все строки этой таблицы, их порядок и замыкание</label><p>Сохранение даёт исходный контур для проверки. Параметры СК, кадастровая идентичность и права остаются неподтверждёнными.</p><button class="button secondary" type="submit">Сохранить сверку и проверить контур</button></form><p id="scan-review-message" role="status"></p><details><summary>Исходная страница с заголовками</summary>${p.source_views.map(v=>`<a href="/api/municipal/ocr/page?document=${encodeURIComponent(p.document_id)}&page=${p.page}&view=${v.view}" target="_blank" rel="noopener noreferrer">Открыть чтение ${v.view+1}</a><img src="/api/municipal/ocr/page?document=${encodeURIComponent(p.document_id)}&page=${p.page}&view=${v.view}" style="width:100%;height:auto" alt="Исходная страница ${p.page}">`).join('')}</details>`;
+ if(s&&!s.stale){el('scan-review-axes').value=s.axes;el('scan-review-kind').value=s.reviewer_kind}
+ el('scan-review-form').addEventListener('submit',async e=>{e.preventDefault();
+ const input={draft_id:scanDrafts.id,document_id:p.document_id,page:p.page,table:t.ordinal,
+  label:el('scan-review-label').value,stated_area:el('scan-review-area').value,axes:el('scan-review-axes').value,
+  crs_label:el('scan-review-crs').value,reviewer:el('scan-review-author').value,reviewer_kind:el('scan-review-kind').value,
+  visual_checked:el('scan-review-confirm').checked,rows:el('scan-review-rows').value.trim().split(/\r?\n/).filter(x=>x.trim()).map(x=>x.trim().split(/\s+/))};
+ const ok=await scanOperation('/api/scan-tables/review',input);if(el('scan-review-message'))el('scan-review-message').textContent=ok?'Сверка сохранена. Результат проверки показан в таблице скана.':'Сверка не сохранена; причина показана в статусе.';
+ });
+ el('scan-review-editor').scrollIntoView({block:'start'});
+}
+async function scanOperation(path,input){
+ if(running)return false;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+ try{const j=await api(path,input);let s;do{await new Promise(r=>setTimeout(r,1000));s=await api('/api/jobs/'+j.job_id);await refreshScanTables()}while(s.state==='running');if(s.state==='error')throw Error(s.error);return true}
+ catch(e){el('scan-status').textContent+='\nНе завершено: '+e.message;return false}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);scanPages()}
+}
