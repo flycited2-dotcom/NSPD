@@ -21,7 +21,7 @@ from land.exports import bundle, dossier
 from land import nspd
 from land import survey
 from land import publications
-from land import planning_watch
+from land import planning_watch, planning_maps
 from land import torgi
 from land import municipal
 from land import municipal_local
@@ -205,6 +205,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/planning', '/api/planning/export'):
                 return self.send(planning_watch.report(project), filename='district-document-versions.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/planning/maps', '/api/planning/maps/export'):
+                data = planning_maps.report(project)
+                with JOB_LOCK:
+                    active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
+                if data['attempt'] and data['attempt']['state'] == 'running' and not active:
+                    data['attempt'] = dict(data['attempt'], state='interrupted')
+                return self.send(data, filename='pzz-map-pages.json' if p.path.endswith('/export') else None)
+            if p.path == '/api/planning/maps/page':
+                raw = planning_maps.preview(project, query.get('document', [''])[0], int(query.get('page', ['0'])[0]))
+                return self.send(raw, content_type='image/png')
+            if p.path == '/api/planning/maps/report':
+                return self.send(planning_maps.html_report(project), content_type='text/html; charset=utf-8')
             if p.path == '/api/planning/report':
                 return self.send(planning_watch.html_report(project), content_type='text/html; charset=utf-8')
             if p.path in ('/api/torgi', '/api/torgi/export'):
@@ -335,6 +347,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Перечни документов района и ПЗЗ', lambda: planning_watch.catalog(project)))
             if path == '/api/planning/read':
                 return self.send(launch_job(project, 'Версии и реквизиты PDF района', lambda: planning_watch.read(project, data)))
+            if path == '/api/planning/maps':
+                return self.send(launch_job(project, 'Карты приложений ПЗЗ', lambda: planning_maps.run(project, data)))
             if path == '/api/torgi':
                 return self.send(launch_job(project, 'Поиск лотов ГИС Торги', lambda: torgi.run(project, data)))
             if path == '/api/torgi/geometry':

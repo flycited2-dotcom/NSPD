@@ -19,6 +19,7 @@ function gapTable(features,actions=false){
 }
 async function refreshSurvey(){
  const data=await api('/api/survey');currentSurvey=data.result;
+ if(typeof refreshPzzMaps==='function')await refreshPzzMaps();
  el('survey-watch').innerHTML=gapTable(data.watchlist.map(x=>x.feature));
  const a=data.attempt;
  el('survey-status').textContent=a?`Последняя попытка: ${a.state==='done'?'завершена':a.state==='running'?'выполняется':a.state==='interrupted'?'прервана':'ошибка'} · ${a.started_at}. Получены слои: ${a.completed_layers.map(k=>({parcels:'ЕГРН',free:'предложения',auction:'аукционы',buildings:'здания',pzz:'территориальные зоны',restrictions:'ЗОУИТ'}[k]||k)).join(', ')||'нет'}.${a.error?' '+a.error+' Предыдущий результат не обновлён.':''}`:'Обследование ещё не выполнялось.';

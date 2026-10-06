@@ -3,7 +3,7 @@ import argparse
 import json
 from pathlib import Path
 from land import store
-from land import planning_watch
+from land import planning_watch, planning_maps
 from land.geometry import validate_layer
 from land.exports import bundle
 from app import run_analysis, SOURCES
@@ -21,7 +21,7 @@ def main():
     exp=sub.add_parser('export')
     exp.add_argument('file',type=Path)
     district=sub.add_parser('planning',help='Районные проекты и ПЗЗ: ограниченные перечни и версии')
-    district.add_argument('action',choices=['catalog','read','report'])
+    district.add_argument('action',choices=['catalog','read','report','maps','maps-report'])
     district.add_argument('--retry',action='store_true')
     district.add_argument('--output',type=Path,help='HTML-отчёт с источниками, датами и конфликтами')
     args=p.parse_args()
@@ -41,10 +41,16 @@ def main():
         elif args.action=='read':
             current=store.get_setting('planning_watch_'+args.project) or {}
             result=planning_watch.read(args.project,{'id':current.get('id'),'retry':args.retry})
+        elif args.action=='maps':
+            current=store.get_setting('planning_watch_'+args.project) or {}
+            survey=store.get_setting('survey_'+args.project) or {}
+            result=planning_maps.run(args.project,{'planning_id':current.get('id'),'survey_id':survey.get('id')})
+        elif args.action=='maps-report':
+            result=planning_maps.report(args.project)
         else:
             result=planning_watch.report(args.project)
         if args.output:
-            args.output.write_bytes(planning_watch.html_report(args.project))
+            args.output.write_bytes(planning_maps.html_report(args.project) if args.action in ('maps','maps-report') else planning_watch.html_report(args.project))
         print(json.dumps(result,ensure_ascii=False,indent=2))
 
 if __name__=='__main__':

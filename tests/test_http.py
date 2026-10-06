@@ -65,6 +65,23 @@ def test_district_report_and_protected_operations(server, monkeypatch):
     assert job['state']=='done' and job['result']=={'documents':2}
 
 
+def test_pzz_maps_endpoints_guard_and_stale_state(server):
+    store.set_setting('planning_maps_trudovoe',{'planning_id':'old','survey_id':'s1','documents':[]})
+    store.set_setting('planning_watch_trudovoe',{'id':'new','items':[]})
+    store.set_setting('survey_trudovoe',{'id':'s1'})
+    store.set_setting('planning_maps_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/planning/maps/export') as r:
+        data=json.load(r)
+        assert 'pzz-map-pages.json' in r.headers['Content-Disposition']
+    assert data['stale'] and data['attempt']['state']=='interrupted'
+    with request(server,'/api/planning/maps/report') as r:
+        assert 'text/html' in r.headers['Content-Type']
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/planning/maps',{},token=False)
+    assert error.value.code==403
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/planning/maps/page?document=doc&page=1')
+    assert error.value.code==400
+
+
 def test_municipal_large_export_and_protected_endpoint(server):
     store.set_setting('municipal_trudovoe',{'id':'m1','items':[]})
     store.set_setting('municipal_large_attempt_trudovoe',{'state':'running'})
