@@ -33,6 +33,7 @@ from land import scan_cells,scan_source,scan_review
 from land import torgi_docs
 from land import georeference
 from land import torgi_visual
+from land import recon
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -114,6 +115,16 @@ class Handler(BaseHTTPRequestHandler):
             project = project_name(query.get('project', ['trudovoe'])[0])
             if p.path == '/api/state':
                 return self.send(state(project))
+            if p.path in ('/api/recon','/api/recon/export','/api/recon/geojson','/api/recon/report','/api/recon/dossier'):
+                data=recon.report(project)
+                with JOB_LOCK:active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
+                if data['attempt'] and data['attempt']['state']=='running' and not active:data['attempt']=dict(data['attempt'],state='interrupted')
+                if p.path=='/api/recon/dossier':
+                    data=recon.load(project,query.get('result_id',[''])[0])
+                    return self.send(recon.html_report(data,query.get('id',[''])[0]),content_type='text/html; charset=utf-8')
+                if p.path=='/api/recon/report':return self.send(recon.html_report(data),content_type='text/html; charset=utf-8')
+                if p.path=='/api/recon/geojson':return self.send(recon.collection(data),content_type='application/geo+json; charset=utf-8',filename='unverified-land-candidates.geojson')
+                return self.send(data,filename='land-search-with-evidence.json' if p.path.endswith('/export') else None)
             if p.path == '/api/session':
                 return self.send({'token': TOKEN, 'app': 'land-recon'})
             if p.path == '/api/municipal/ocr/page':
@@ -359,6 +370,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Сопоставление лотов с областью', lambda: torgi.locate(project, data)))
             if path == '/api/torgi/rematch':
                 return self.send(launch_job(project, 'Сопоставление сохранённых лотов', lambda: torgi.rematch(project, data)))
+            if path == '/api/recon':
+                return self.send(launch_job(project,'Поиск контуров для разработки',lambda:recon.run(project,data)))
+            if path == '/api/recon/watch':
+                return self.send(recon.watch(project,data))
             if path == '/api/survey/watch':
                 with store.LOCK:
                     result = store.get_setting('survey_' + project, {})

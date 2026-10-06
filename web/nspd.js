@@ -6,15 +6,19 @@ const contours=L.featureGroup().addTo(nmap);
 L.control.scale({imperial:false}).addTo(nmap);
 let token, latest, running=false;
 let areaOutline, cornerMarker, firstCorner=null, selecting=false, tiles=null, areaLoaded=false;
+let selectionMap=nmap;
 const boundsInput=()=>['west','south','east','north'].map(x=>Number(el(x).value));
 function writeBounds(bounds){['west','south','east','north'].forEach((id,i)=>el(id).value=Number(bounds[i]).toFixed(6));drawArea()}
 function drawArea(){
  const [w,s,e,n]=boundsInput();if(areaOutline){nmap.removeLayer(areaOutline);areaOutline=null;}
  if([w,s,e,n].every(Number.isFinite)&&w<e&&s<n)areaOutline=L.rectangle([[s,w],[n,e]],{color:'#b07925',weight:2,dashArray:'7 5',fillOpacity:0,interactive:false}).addTo(nmap);
+ if(typeof drawReconArea==='function')drawReconArea();
 }
-function stopSelection(){selecting=false;firstCorner=null;if(cornerMarker)nmap.removeLayer(cornerMarker);el('select-area').textContent='Выделить область: 2 угла';nmap.getContainer().style.cursor='';}
-el('select-area').addEventListener('click',()=>{if(selecting){stopSelection();el('area-status').textContent='Выделение отменено.';return}selecting=true;el('select-area').textContent='Отменить выделение';el('area-status').textContent='Нажмите первый угол, затем противоположный. Двигать карту можно как обычно.';nmap.getContainer().style.cursor='crosshair'});
-nmap.on('click',e=>{if(!selecting)return;if(!firstCorner){firstCorner=e.latlng;cornerMarker=L.circleMarker(e.latlng,{radius:5,color:'#b07925'}).addTo(nmap);el('area-status').textContent='Теперь нажмите противоположный угол.';return}writeBounds([Math.min(firstCorner.lng,e.latlng.lng),Math.min(firstCorner.lat,e.latlng.lat),Math.max(firstCorner.lng,e.latlng.lng),Math.max(firstCorner.lat,e.latlng.lat)]);stopSelection();el('cadnum').value='';el('area-status').textContent='Область выделена. Сохраните её или запустите поиск по области.'});
+function stopSelection(){selecting=false;firstCorner=null;if(cornerMarker){selectionMap.removeLayer(cornerMarker);cornerMarker=null}el('select-area').textContent='Выделить область: 2 угла';if(el('recon-select'))el('recon-select').textContent='Выделить область';selectionMap.getContainer().style.cursor='';}
+function startSelection(map,button){if(selecting&&selectionMap===map){stopSelection();el('area-status').textContent='Выделение отменено.';return}stopSelection();selectionMap=map;selecting=true;button.textContent='Отменить выделение';el('area-status').textContent='Нажмите первый угол, затем противоположный. Двигать карту можно как обычно.';map.getContainer().style.cursor='crosshair';}
+function selectCorner(e){if(!selecting||e.target!==selectionMap)return;if(!firstCorner){firstCorner=e.latlng;cornerMarker=L.circleMarker(e.latlng,{radius:5,color:'#b07925'}).addTo(selectionMap);el('area-status').textContent='Теперь нажмите противоположный угол.';if(el('recon-area'))el('recon-area').textContent='Теперь нажмите противоположный угол.';return}writeBounds([Math.min(firstCorner.lng,e.latlng.lng),Math.min(firstCorner.lat,e.latlng.lat),Math.max(firstCorner.lng,e.latlng.lng),Math.max(firstCorner.lat,e.latlng.lat)]);stopSelection();el('cadnum').value='';el('area-status').textContent='Область выделена. Сохраните её или запустите поиск по области.';}
+el('select-area').addEventListener('click',()=>startSelection(nmap,el('select-area')));
+nmap.on('click',selectCorner);
 el('fit-area').addEventListener('click',()=>{drawArea();if(areaOutline)nmap.fitBounds(areaOutline.getBounds(),{padding:[20,20]})});
 el('save-area').addEventListener('click',async()=>{try{await api('/api/nspd/area',{bounds:boundsInput()});el('area-status').textContent='Область сохранена. Это рабочий контур поиска, не официальная граница.'}catch(e){el('area-status').textContent=e.message}});
 ['west','south','east','north'].forEach(id=>el(id).addEventListener('input',()=>{drawArea();el('area-status').textContent='Границы изменены; сохраните область.'}));

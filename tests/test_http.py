@@ -41,6 +41,34 @@ def test_municipal_local_export_and_protected_endpoint(server):
     assert error.value.code==403
 
 
+def test_recon_export_reports_interrupted_attempt_and_protects_operations(server,monkeypatch):
+    import time
+    store.set_setting('recon_attempt_trudovoe',{'state':'running','step':'Подбор контуров'})
+    with request(server,'/api/recon/export') as response:
+        assert 'land-search-with-evidence.json' in response.headers['Content-Disposition']
+        data=json.load(response)
+    assert data['result'] is None and data['attempt']['state']=='interrupted'
+    with request(server,'/api/recon/report') as response:assert 'Досье не является СРЗУ'.encode() in response.read()
+    for path in ('/api/recon','/api/recon/watch'):
+        with pytest.raises(urllib.error.HTTPError) as error:request(server,path,{},token=False)
+        assert error.value.code==403
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/recon/dossier?result_id=../secret&id=x')
+    assert error.value.code==400
+    monkeypatch.setattr(app.recon,'run',lambda project,params:{'drafts':6})
+    with request(server,'/api/recon',{'bounds':[34.2,44.99,34.21,45]}) as response:job_id=json.load(response)['job_id']
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done' and job['result']=={'drafts':6}
+
+
+def test_recon_page_serves_new_workflow(server):
+    with request(server,'/nspd.html') as response:page=response.read()
+    assert b'id="recon-map"' in page and b'id="recon-run"' in page and b'src="/recon.js"' in page
+    with request(server,'/recon.js') as response:assert b'/api/recon/watch' in response.read()
+
+
 def test_district_report_and_protected_operations(server, monkeypatch):
     from land import planning_watch
     with request(server,'/api/planning/export') as r:
