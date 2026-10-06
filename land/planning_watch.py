@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse
 from . import store
 from .network import fetch
 
-ALGORITHM = 'district-planning-v2'
+ALGORITHM = 'district-planning-v3'
 HOST = 'simfmo-rk.ru'
 MAX_LINKS, MAX_SESSIONS, MAX_DOCUMENTS, BATCH = 1000, 16, 100, 3
 MAX_BYTES = 32 * 1024 * 1024
@@ -25,7 +25,7 @@ SOURCES = (
 )
 LIMITATION = ('Проверяются только четыре указанных перечня района: проекты «Коммунальник»/СНТ «Труд» '
               'и ссылки ПЗЗ Трудовского поселения в разделе 2026 года. '
-              'Дополнительно подключаются датированные ссылки из сохранённой проверки перечней ГП/ПЗЗ, если она выполнена. '
+              'Дополнительно подключаются датированные ссылки из сохранённых проверок перечней ГП/ПЗЗ и архива II созыва, если они выполнены. '
               'Это не полная история, не сводная действующая редакция и не проверка прав. Реквизиты и связи извлечены из текста; '
               'подлинность, вступление в силу и применимость к контуру требуют сверки. '
               'Сканы не распознаются. Отсутствие документа не подтверждает свободность земли.')
@@ -123,7 +123,7 @@ def save(project, result):
     result['id'] = digest(result)[:20]
     folder = store.DATA / 'planning_watch'
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / (result['id'] + '.json')).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    store.atomic_write(folder / (result['id'] + '.json'), json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
     store.set_setting('planning_watch_' + project, result)
 
 
@@ -190,6 +190,8 @@ def catalog(project):
         raise ValueError('Перечни района настроены только для проекта Трудовое')
     old = store.get_setting('planning_watch_' + project) or {}
     history_id, history_sources, history = history_links(project)
+    from . import planning_archive
+    archive_id, archive_sources, archive = planning_archive.links(project)
     result = {'algorithm': ALGORITHM, 'checked_at': store.now(), 'sources': [], 'items': [],
               'complete': False, 'geometry_confirmed': False, 'legal_status_confirmed': False, 'limitation': LIMITATION,
               'previous_report_id': old.get('id')}
@@ -206,7 +208,7 @@ def catalog(project):
             sha = hashlib.sha256(raw).hexdigest()
             folder = store.DATA / 'planning_watch'
             folder.mkdir(parents=True, exist_ok=True)
-            (folder / (sha + '.html')).write_bytes(raw)
+            store.atomic_write(folder / (sha + '.html'), raw)
             record.update(state='received', sha256=sha, bytes=len(raw), http_status=code, link_count=len(links))
             selected = [x for x in links if re.search(r'сессия\b', x['title'], re.I) and '2026' in x['title'] and not urlparse(x['url']).path.lower().endswith('.pdf')] if sessions else [x for x in links if eligible(x, pzz)]
             if sessions:
@@ -229,7 +231,12 @@ def catalog(project):
         receive(source, sessions=source['id'] == 'pzz2026')
     result['history_source_id'] = history_id
     result['sources'].extend(history_sources)
+    result['archive_source_id'] = archive_id
+    result['archive_counts'] = planning_archive.counts(store.get_setting('planning_archive_' + project))
+    result['sources'].extend(archive_sources)
     for url, refs in history.items():
+        found.setdefault(url, []).extend(refs)
+    for url, refs in archive.items():
         found.setdefault(url, []).extend(refs)
     if len(found) > MAX_DOCUMENTS:
         raise ValueError('Число документов превышает лимит; прежний каталог сохранён')
@@ -259,6 +266,8 @@ def catalog(project):
             raise ValueError('Каталог района изменился во время получения; прежний результат не заменён')
         if (store.get_setting('planning_boundary_' + project) or {}).get('id') != history_id:
             raise ValueError('Перечни ГП/ПЗЗ изменились во время получения; каталог не заменён')
+        if (store.get_setting('planning_archive_' + project) or {}).get('id') != archive_id:
+            raise ValueError('Архив ПЗЗ изменился во время получения; каталог не заменён')
         save(project, result)
     with store.connect() as db:
         store.event(db, project, 'planning_catalog', {'id': result['id'], 'documents': len(result['items']), 'source_errors': len(errors)})
@@ -288,12 +297,21 @@ def identity(text):
 
 def text_evidence(pages):
     first = pages[0][1] if pages else ''
-    head = re.search(r'\b(ПОСТАНОВЛЕНИЕ|РЕШЕНИЕ)\b', first[:1000], re.I)
+    # Only a standalone heading identifies an act. A quoted “в решение от ...”
+    # in the title/body must never lend its identity to this document.
+    head = re.search(r'^\s*(ПОСТАНОВЛЕНИЕ|РЕШЕНИЕ)\s*$', first, re.I | re.M)
     # Stop before the title: an unreadable header must never inherit the base
     # act's identity from “О внесении изменений в решение от ...”.
     header = re.split(r'\n\s*(?:О\s+|Об\s+|Рассмотрев\b|В соответствии\b)', first[head.end():], maxsplit=1, flags=re.I)[0][:250] if head else ''
     own = identity(header) if head else None
-    draft = bool(head and re.search(r'\bпроект\b', first[:head.start()], re.I))
+    if head and own is None:
+        # Observed older PDFs put the visual heading last in extracted text,
+        # but begin with the document's own date/city/number on a single line.
+        # Require that exact leading-line structure; don't search the body.
+        leading = next((line.strip() for line in first.splitlines() if line.strip()), '')
+        if re.match(r'^' + DATE + r'\b.{0,70}?№\s*' + NUMBER, leading, re.I):
+            own = identity(leading)
+    draft = bool(head and re.search(r'^\s*ПРОЕКТ\s*$', first[:min(head.start(), 1000)], re.I | re.M))
     full = '\n'.join(t for _, t in pages)
     operative = re.search(r'(?:ПОСТАНОВЛЯЕТ|решил[аи]?)\s*:', full, re.I)
     actions, refs = [], []
@@ -388,7 +406,7 @@ def read(project, params):
             sha = hashlib.sha256(raw).hexdigest()
             folder = store.DATA / 'planning_watch'
             folder.mkdir(parents=True, exist_ok=True)
-            (folder / (sha + '.pdf')).write_bytes(raw)
+            store.atomic_write(folder / (sha + '.pdf'), raw)
             details = read_pdf(sha)
             if row.get('sha256') and row['sha256'] != sha:
                 if len(row.get('previous_versions', [])) >= 50:
@@ -457,7 +475,7 @@ def reprocess(project, params):
 def report(project):
     result = store.get_setting('planning_watch_' + project)
     if not result:
-        return {'result': None, 'limitation': LIMITATION}
+        return {'result': None, 'limitation': LIMITATION, 'archive_stale': bool(store.get_setting('planning_archive_' + project))}
     result = copy.deepcopy(result)
     timelines = {}
     for row in result['items']:
@@ -481,7 +499,9 @@ def report(project):
     chronological = [{'subject': name, 'entries': sorted(entries.values(), key=lambda x: (x['date'], x['number'])),
                        'legal_status_confirmed': False} for name, entries in timelines.items()]
     history_stale=bool(result.get('history_source_id') and result['history_source_id']!=(store.get_setting('planning_boundary_'+project) or {}).get('id'))
+    archive_stale=result.get('archive_source_id')!=(store.get_setting('planning_archive_'+project) or {}).get('id')
     return {'result': result, 'timelines': chronological, 'limitation': LIMITATION,'history_stale':history_stale,
+            'archive_stale':archive_stale,
             'reprocess_remaining': sum(needs_reprocess(r) for r in result['items'])}
 
 

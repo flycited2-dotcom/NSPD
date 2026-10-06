@@ -66,6 +66,29 @@ def test_base_act_in_listing_is_not_mistaken_for_own_identity():
     assert pw.listing_identity('№290 от 19.11.2025 «О внесении изменений в решение от 26.06.2019 № 1239»') == {'date': '2025-11-19', 'number': '290'}
 
 
+def test_heading_extracted_after_body_keeps_leading_own_identity():
+    pages = [(1, '18 октября 2019 г. г. Симферополь №24\n'
+                 'О рассмотрении протеста на решение от 26.06.2019 № 1239\n'
+                 'районный совет решил:\n1. Протест отклонить.\n'
+                 '2. Направить ответ.\nРЕШЕНИЕ')]
+    result = pw.text_evidence(pages)
+    assert result['act_identity'] == {'date': '2019-10-18', 'number': '24'}
+    assert result['document_role'] == 'act_text' and result['action'] == 'unknown'
+    assert not result['legal_status_confirmed']
+
+
+def test_inline_reference_without_standalone_heading_never_claims_act_identity():
+    result = pw.text_evidence([(1, 'О рассмотрении протеста на решение от 26.06.2019 № 1239\n'
+                                  'Рассмотрев проект, районный совет решил:\n1. Внести изменения.')])
+    assert result['act_identity'] is None and result['document_role'] == 'planning_document'
+
+
+def test_late_heading_does_not_treat_discussed_project_as_draft_or_use_body_date():
+    result = pw.text_evidence([(1, 'О рассмотрении проекта решения от 26.06.2019 № 1239\n'
+                                  'районный совет решил:\n1. Внести изменения.\nРЕШЕНИЕ')])
+    assert result['act_identity'] is None and result['document_role'] == 'planning_document'
+
+
 def test_action_in_second_clause_is_retained_without_parsing_annex():
     result = pw.text_evidence([(1, 'РЕШЕНИЕ\n24 июня 2026 года № 413\nрайонный совет решил:\n1. Протест удовлетворить.\n2. Внести в решение от 26.06.2019 № 1239 изменения.\nПредседатель\nПодпись\nПриложение\n1. Отменить решение от 01.01.2020 № 99.')])
     assert result['action'] == 'amend_reference' and len(result['references']) == 1

@@ -1,12 +1,12 @@
 'use strict';
-let districtReport=null;
+let districtReport=null,districtArchive=null;
 const districtLabel={pending:'не прочитан',read:'текст прочитан',error:'ошибка',received:'получен',unchecked:'нужна новая проверка',
  act_text:'текст акта',draft_text:'текст проекта',planning_document:'документация',unknown:'не установлено',
  approve_text:'утверждение по тексту',cancel_reference:'отмена указанного акта по тексту',amend_reference:'изменение указанного акта по тексту',multiple_text_actions:'несколько действий по тексту'};
 const districtText=x=>escapeHtml(districtLabel[x]||x||'не установлено');
 const districtCanReprocess=()=>districtReport?.items.some(x=>el('district-retry').checked?x.reprocess_retry_eligible:x.reprocess_eligible);
 async function refreshDistrict(){
- const {result:r,limitation,history_stale,reprocess_remaining}=await api('/api/planning');districtReport=r;
+ const {result:r,limitation,history_stale,archive_stale,reprocess_remaining}=await api('/api/planning');districtReport=r;
  el('district-read').disabled=running||!r;
  el('district-read-pzz').disabled=running||!r;
  el('district-reprocess').disabled=running||!districtCanReprocess();
@@ -17,6 +17,7 @@ async function refreshDistrict(){
  el('district-status').textContent+=` Сохранённых PDF для нового разборщика: ${reprocess_remaining||0}.`;
  const pzz=r.items.filter(x=>x.currently_listed&&x.listing_references.some(ref=>ref.planning_kind==='pzz'||ref.root_url==='https://simfmo-rk.ru/2026-2/'));
  el('district-status').textContent+=` ПЗЗ: ${pzz.length} ссылок, осталось проверить ${pzz.filter(x=>x.read_revision!==r.catalog_revision).length}.${history_stale?' Сохранённая проверка перечней ГП/ПЗЗ изменилась; обновите каталог.':''}`;
+ if(archive_stale)el('district-status').textContent+=' Проверка архива изменилась; обновите каталог района, чтобы подключить найденные ссылки.';
  el('district-results').innerHTML=r.items.map(x=>{
   const act=x.act_identity;const conflicts=x.listing_conflicts||[];
   const dates=[...new Set(x.listing_references.map(a=>a.publication_date).filter(Boolean))];
@@ -42,3 +43,27 @@ el('district-read-pzz').addEventListener('click',()=>runDistrict('read','pzz'));
 el('district-reprocess').addEventListener('click',()=>runDistrict('reprocess'));
 el('district-retry').addEventListener('change',()=>el('district-reprocess').disabled=running||!districtCanReprocess());
 refreshDistrict().catch(e=>el('district-status').textContent=e.message);
+
+async function refreshDistrictArchive(){
+ const r=await api('/api/planning/archive');districtArchive=r.result;
+ const c=r.counts;
+ el('district-archive-status').textContent=districtArchive?`Архив II созыва: ${c.received}/${c.total} страниц получено; очередь ${c.remaining}; ошибки ${c.errors}; ссылок ПЗЗ Трудовского ${r.document_links}. Последняя проверка: ${districtArchive.updated_at}. ${r.limitation}`:'Архив II созыва ещё не проверялся. '+r.limitation;
+ el('district-archive').disabled=running||Boolean(districtArchive&&!c.remaining&&(!el('district-retry').checked||!c.errors));
+ el('district-archive-refresh').disabled=running;
+ el('district-archive-pages').innerHTML=(districtArchive?.pages||[]).map(p=>`<details><summary>${escapeHtml(p.title)} · ${districtText(p.state)}</summary><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">Официальная страница</a><p>Получена: ${escapeHtml(p.received_at||'нет')}. Последняя попытка: ${escapeHtml(p.attempt?.checked_at||'нет')}. ${escapeHtml(p.error||'')}</p></details>`).join('');
+}
+async function runDistrictArchive(refresh=false){
+ if(running)return;
+ running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+ el('district-archive-status').textContent='Проверяется следующая порция официального архива, до десяти страниц. PDF не скачиваются.';
+ try{
+  const job=await api('/api/planning/archive',{id:districtArchive?.id||null,refresh,retry:el('district-retry').checked});let state;
+  do{await new Promise(r=>setTimeout(r,1000));state=await api('/api/jobs/'+job.job_id)}while(state.state==='running');
+  await refreshDistrictArchive();await refreshDistrict();if(state.state==='error')throw Error(state.error);
+ }catch(e){el('district-archive-status').textContent+=' Не выполнено: '+e.message}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);await refreshDistrictArchive().catch(e=>el('district-archive-status').textContent=e.message);el('district-read').disabled=!districtReport;el('district-read-pzz').disabled=!districtReport;el('district-reprocess').disabled=!districtCanReprocess()}
+}
+el('district-archive').addEventListener('click',()=>runDistrictArchive());
+el('district-archive-refresh').addEventListener('click',()=>runDistrictArchive(true));
+el('district-retry').addEventListener('change',()=>refreshDistrictArchive().catch(e=>el('district-archive-status').textContent=e.message));
+refreshDistrictArchive().catch(e=>el('district-archive-status').textContent=e.message);

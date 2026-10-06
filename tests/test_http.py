@@ -117,7 +117,7 @@ def test_district_report_and_protected_operations(server, monkeypatch):
     with request(server,'/api/planning/report') as r:
         assert 'text/html' in r.headers['Content-Type']
         assert 'Документы района'.encode() in r.read()
-    for path in ('/api/planning/catalog','/api/planning/read','/api/planning/reprocess'):
+    for path in ('/api/planning/catalog','/api/planning/read','/api/planning/reprocess','/api/planning/archive'):
         with pytest.raises(urllib.error.HTTPError) as error:
             request(server,path,{},token=False)
         assert error.value.code==403
@@ -131,6 +131,23 @@ def test_district_report_and_protected_operations(server, monkeypatch):
         if job['state']!='running':break
         time.sleep(.01)
     assert job['state']=='done' and job['result']=={'documents':2}
+
+
+def test_planning_archive_export_and_job(server, monkeypatch):
+    with request(server, '/api/planning/archive/export') as response:
+        assert 'district-pzz-archive.json' in response.headers['Content-Disposition']
+        report = json.load(response)
+    assert report['result'] is None and report['counts']['total'] == 0
+    monkeypatch.setattr(app.planning_archive, 'scan', lambda project, params: {'processed': 10, 'geometry_confirmed': False})
+    with request(server, '/api/planning/archive', {'id': None}) as response:
+        job_id = json.load(response)['job_id']
+    import time
+    for _ in range(30):
+        with request(server, '/api/jobs/' + job_id) as response:
+            job = json.load(response)
+        if job['state'] != 'running': break
+        time.sleep(.01)
+    assert job['state'] == 'done' and job['result']['processed'] == 10
 
 
 def test_pzz_maps_endpoints_guard_and_stale_state(server):

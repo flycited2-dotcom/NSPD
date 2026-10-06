@@ -2,12 +2,30 @@ import json
 import sqlite3
 import threading
 import hashlib
+import os
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / 'data'
 LOCK = threading.RLock()
+
+
+def atomic_write(path, raw):
+    """Keep the previous file intact if a source/cache write cannot finish."""
+    path = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + '.', suffix='.tmp', delete=False) as output:
+            temporary = Path(output.name)
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def now():

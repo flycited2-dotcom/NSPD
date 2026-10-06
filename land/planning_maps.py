@@ -13,7 +13,7 @@ from . import store, planning_watch, torgi
 ALGORITHM = 'pzz-map-pairs-v2'
 RESULT_ALGORITHM = 'pzz-map-catalog-v3'
 RENDER_ALGORITHM = 'pzz-map-poppler-2400-v1'
-MAX_DOCUMENTS, MAX_BYTES = 16, 32 * 1024 * 1024
+MAX_DOCUMENTS, MAX_BYTES = 40, 32 * 1024 * 1024
 MAX_MAP_PAGES = 24
 MAX_TOTAL_MAP_PAGES = MAX_DOCUMENTS * MAX_MAP_PAGES
 RENDER_BATCH = 3
@@ -80,7 +80,7 @@ def inspect_pdf(sha):
         return dict(result, cached=True)
     result = worker('inspect', sha)
     validate_index(result)
-    path.write_text(json.dumps(dict(result, content_sha256=planning_watch.digest(result)), ensure_ascii=False, indent=2), encoding='utf-8')
+    store.atomic_write(path, json.dumps(dict(result, content_sha256=planning_watch.digest(result)), ensure_ascii=False, indent=2).encode('utf-8'))
     return dict(result, cached=False)
 
 
@@ -143,7 +143,7 @@ def render_page(sha, page):
         return dict(details, cached=True)
     details = worker('render', sha, page)
     checked_image(sha, page, details)
-    target.write_text(json.dumps(details, ensure_ascii=False, indent=2), encoding='utf-8')
+    store.atomic_write(target, json.dumps(details, ensure_ascii=False, indent=2).encode('utf-8'))
     return dict(details, cached=False)
 
 
@@ -214,7 +214,7 @@ def render_batch(result, retry=False):
 def save(project,result):
     result['id']=planning_watch.digest(result)[:20]
     folder=store.DATA/'planning_maps';folder.mkdir(exist_ok=True)
-    (folder/(result['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+    store.atomic_write(folder/(result['id']+'.json'), json.dumps(result,ensure_ascii=False,indent=2).encode('utf-8'))
     store.set_setting('planning_maps_'+project,result)
 
 
