@@ -5,7 +5,7 @@ const nmap=L.map('nmap').setView([44.99335,34.20543],15);
 const contours=L.featureGroup().addTo(nmap);
 L.control.scale({imperial:false}).addTo(nmap);
 let token, latest, running=false;
-let areaOutline, cornerMarker, firstCorner=null, selecting=false, tiles=null, areaLoaded=false;
+let areaOutline, cornerMarker, firstCorner=null, selecting=false, areaLoaded=false;
 let selectionMap=nmap;
 const boundsInput=()=>['west','south','east','north'].map(x=>Number(el(x).value));
 function writeBounds(bounds){['west','south','east','north'].forEach((id,i)=>el(id).value=Number(bounds[i]).toFixed(6));drawArea()}
@@ -22,7 +22,7 @@ nmap.on('click',selectCorner);
 el('fit-area').addEventListener('click',()=>{drawArea();if(areaOutline)nmap.fitBounds(areaOutline.getBounds(),{padding:[20,20]})});
 el('save-area').addEventListener('click',async()=>{try{await api('/api/nspd/area',{bounds:boundsInput()});el('area-status').textContent='Область сохранена. Это рабочий контур поиска, не официальная граница.'}catch(e){el('area-status').textContent=e.message}});
 ['west','south','east','north'].forEach(id=>el(id).addEventListener('input',()=>{drawArea();el('area-status').textContent='Границы изменены; сохраните область.'}));
-el('osm').addEventListener('change',()=>{if(el('osm').checked){tiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(nmap)}else if(tiles){nmap.removeLayer(tiles);tiles=null}});
+LandBasemap.bind(nmap,el('osm'));
 drawArea();
 async function api(path,data){
   const r=await fetch(path,data?{method:'POST',headers:{'Content-Type':'application/json','X-Local-Token':token},body:JSON.stringify({project:'trudovoe',...data})}:{});

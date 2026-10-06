@@ -69,6 +69,26 @@ def test_recon_page_serves_new_workflow(server):
     with request(server,'/recon.js') as response:assert b'/api/recon/watch' in response.read()
 
 
+def test_shared_basemap_asset_load_order_and_default_opt_in(server):
+    from html.parser import HTMLParser
+    class Page(HTMLParser):
+        def __init__(self):super().__init__();self.scripts=[];self.controls={}
+        def handle_starttag(self,tag,attrs):
+            fields=dict(attrs)
+            if tag=='script' and 'src' in fields:self.scripts.append(fields['src'])
+            if 'id' in fields:self.controls[fields['id']]=fields
+    for path,map_script in (('/','/app.js'),('/nspd.html','/nspd.js')):
+        with request(server,path) as response:html=response.read().decode('utf-8')
+        page=Page();page.feed(html)
+        assert page.scripts.index('/vendor/leaflet.js')<page.scripts.index('/basemap.js')<page.scripts.index(map_script)
+        if path=='/nspd.html':assert 'checked' not in page.controls['recon-osm']
+    with request(server,'/basemap.js') as response:
+        assert response.headers['Referrer-Policy']=='no-referrer'
+        assert response.headers['Cache-Control']=='no-store'
+        assert 'javascript' in response.headers['Content-Type']
+        assert response.read()
+
+
 def test_boundary_export_and_protected_refresh_job(server,monkeypatch):
     import time
     store.set_setting('planning_boundary_attempt_trudovoe',{'state':'running'})

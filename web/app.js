@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeLink = url => /^https:\/\//i.test(url || '') ? esc(url) : '#';
-let project = 'trudovoe', state, token, currentView = 'map', selected = null, baseTiles = null;
+let project = 'trudovoe', state, token, currentView = 'map', selected = null;
 let drawing = L.featureGroup(), fittedProject = null;
 const map = L.map('map', {zoomControl:true, attributionControl:true}).setView([45,34.2], 12);
 drawing.addTo(map);
@@ -77,9 +77,7 @@ function drawMap(fit=false) {
   if((fit||fittedProject!==project)&&drawing.getLayers().length){map.fitBounds(drawing.getBounds(),{padding:[55,70],maxZoom:18});fittedProject=project;}
 }
 $('fit-map').addEventListener('click',()=>{if(drawing.getLayers().length)map.fitBounds(drawing.getBounds(),{padding:[50,60],maxZoom:18});});
-$('basemap').addEventListener('change',()=>{
-  if($('basemap').checked){baseTiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);let warned=false;baseTiles.on('tileerror',()=>{if(!warned){toast('Подложка недоступна. Загруженные векторы по-прежнему отображаются.',true);warned=true;}});}else if(baseTiles){map.removeLayer(baseTiles);baseTiles=null;}
-});
+LandBasemap.bind(map,$('basemap'));
 function renderLayers(){
   $('layers-list').innerHTML=Object.entries(state.roles).map(([role,label])=>{const l=state.layers.find(x=>x.role===role);return `<div class="layer-row"><h3>${l?'✓':'○'} ${esc(label)}</h3>${l?`<p>${esc(l.metadata.title)} · ${l.geojson.features.length} объектов</p><p>${esc(l.metadata.source)}</p><p>Дата сведений: ${esc(l.metadata.checked_at)} · Исходный CRS: ${esc(l.metadata.original_crs)}</p><span class="badge ${l.metadata.official?'green':'yellow'}">${l.metadata.official?'Официальность отмечена пользователем':'Происхождение требует проверки'}</span>`:'<p>Не загружен</p>'}</div>`;}).join('');
 }

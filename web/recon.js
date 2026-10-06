@@ -2,7 +2,7 @@
 const reconMap=L.map('recon-map').setView([44.99335,34.20543],15);
 const reconDraw=L.featureGroup().addTo(reconMap);
 let reconOutline=null,reconResult=null,reconStale=false;
-let reconTiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(reconMap);
+LandBasemap.bind(reconMap,el('recon-osm'));
 const reconNames={draft:'Пробный контур',gap:'Нужно проектирование',offer:'Предложение НСПД',auction:'Аукцион / торги'};
 const reconDate=x=>x?new Date(x).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'не получено';
 const sameReconBounds=()=>reconResult&&reconResult.bounds.every((n,i)=>Math.abs(n-boundsInput()[i])<1e-9);
@@ -50,7 +50,6 @@ reconMap.on('click',selectCorner);
 el('recon-run').addEventListener('click',runRecon);
 el('recon-kind').addEventListener('change',refreshRecon);
 el('boundary-show').addEventListener('change',refreshRecon);
-el('recon-osm').addEventListener('change',()=>{if(el('recon-osm').checked){if(!reconTiles)reconTiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(reconMap)}else if(reconTiles){reconMap.removeLayer(reconTiles);reconTiles=null}});
 for(const container of ['recon-results','recon-watch'])el(container).addEventListener('click',async e=>{
  const show=e.target.closest('[data-recon-show]');if(show){const c=show.dataset.reconWatchShow?reconWatch.find(r=>r.candidate.id===show.dataset.reconShow)?.candidate:reconResult?.candidates.find(c=>c.id===show.dataset.reconShow);if(c){const layer=L.geoJSON({type:'Feature',geometry:c.geometry,properties:{}},{style:{color:'#bc841e',weight:4,fillOpacity:.2}}).addTo(reconDraw);reconMap.fitBounds(layer.getBounds(),{padding:[25,25]})}return;}
  const save=e.target.closest('[data-recon-save]');if(!save||running||!reconResult)return;save.disabled=true;
