@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse
 from . import store
 from .network import fetch
 
-ALGORITHM = 'district-planning-v1'
+ALGORITHM = 'district-planning-v2'
 HOST = 'simfmo-rk.ru'
 MAX_LINKS, MAX_SESSIONS, MAX_DOCUMENTS, BATCH = 1000, 16, 100, 3
 MAX_BYTES = 32 * 1024 * 1024
@@ -24,8 +24,9 @@ SOURCES = (
     {'id': 'pzz2026', 'url': 'https://simfmo-rk.ru/2026-2/'},
 )
 LIMITATION = ('Проверяются только четыре указанных перечня района: проекты «Коммунальник»/СНТ «Труд» '
-              'и ссылки ПЗЗ Трудовского поселения в разделе 2026 года. Это не полная история, '
-              'не сводная действующая редакция и не проверка прав. Реквизиты и связи извлечены из текста; '
+              'и ссылки ПЗЗ Трудовского поселения в разделе 2026 года. '
+              'Дополнительно подключаются датированные ссылки из сохранённой проверки перечней ГП/ПЗЗ, если она выполнена. '
+              'Это не полная история, не сводная действующая редакция и не проверка прав. Реквизиты и связи извлечены из текста; '
               'подлинность, вступление в силу и применимость к контуру требуют сверки. '
               'Сканы не распознаются. Отсутствие документа не подтверждает свободность земли.')
 
@@ -126,10 +127,69 @@ def save(project, result):
     store.set_setting('planning_watch_' + project, result)
 
 
+def is_pzz(row):
+    root = next((s['url'] for s in SOURCES if s['id'] == 'pzz2026'), None)
+    return any((root is not None and ref.get('root_url') == root) or ref.get('planning_kind') == 'pzz'
+               for ref in row.get('listing_references', []))
+
+
+def history_links(project):
+    """Read only the audited snapshot and its exact cached listing bytes."""
+    source = store.get_setting('planning_boundary_' + project)
+    if not source:
+        return None, [], {}
+    from . import planning_boundary
+    content = copy.deepcopy(source); claimed = content.pop('id', None)
+    if not planning_boundary.applicable(source) or claimed != hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:20]:
+        raise ValueError('Сохранённая проверка границы/перечней изменилась; обновите её')
+    pages = source.get('history', {}).get('pages', [])
+    if not isinstance(pages, list) or len(pages) > 40:
+        raise ValueError('Некорректный объём сохранённых перечней')
+    indexed = {p['url']: p for p in pages}
+    verified, records, found = {}, {}, {}
+    items = source.get('history', {}).get('items', [])
+    if not isinstance(items, list) or len(items) > MAX_DOCUMENTS:
+        raise ValueError('Предел ссылок сохранённого перечня превышен')
+    for item in items:
+        if item.get('kind') not in ('pzz', 'gp'):
+            raise ValueError('Неизвестный тип документа перечня')
+        for ref in item.get('references', []):
+            page = indexed.get(ref.get('url'))
+            if not page or page.get('state') not in ('received', 'retained'):
+                raise ValueError('Ссылка не связана с полученной страницей перечня')
+            if page['url'] not in verified:
+                sha = page.get('sha256')
+                if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha):
+                    raise ValueError('Некорректный SHA-256 перечня')
+                path = store.DATA / 'planning_boundary' / (sha + '.html')
+                if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+                    raise ValueError('Сохранённая страница перечня отсутствует или превышает предел')
+                raw = path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != sha:
+                    raise ValueError('Сохранённая страница перечня изменилась')
+                verified[page['url']] = parse_links(raw, page['url'])
+                records[page['url']] = {'id': 'history_' + digest(page['url'])[:12],
+                    'url': page['url'], 'state': page['state'], 'checked_at': page['checked_at'],
+                    'received_at': page['received_at'], 'sha256': sha, 'bytes': len(raw),
+                    'history_source_id': claimed, 'error': page.get('error')}
+            expected = {'url': item['url'], 'title': ref['title'], 'publication_date': ref['publication_date']}
+            if expected not in verified[page['url']] or ref.get('sha256') != page['sha256'] or ref.get('received_at') != page['received_at']:
+                raise ValueError('Ссылка, её название или дата не совпадают с исходным перечнем')
+            if not safe_link(item['url'], item['url']) or not urlparse(item['url']).path.lower().endswith('.pdf'):
+                raise ValueError('Небезопасная ссылка сохранённого PDF')
+            reference = dict(expected, parent_url=page['url'],
+                root_url='https://simfmo-rk.ru/vnesenie-izmenenij-v-' + item['kind'] + '-reshenie-sessij/',
+                listing_sha256=page['sha256'], listed_at=page['received_at'],
+                observation_state=page['state'], planning_kind=item['kind'], history_source_id=claimed)
+            found.setdefault(item['url'], []).append(reference)
+    return claimed, list(records.values()), found
+
+
 def catalog(project):
     if project != 'trudovoe':
         raise ValueError('Перечни района настроены только для проекта Трудовое')
     old = store.get_setting('planning_watch_' + project) or {}
+    history_id, history_sources, history = history_links(project)
     result = {'algorithm': ALGORITHM, 'checked_at': store.now(), 'sources': [], 'items': [],
               'complete': False, 'geometry_confirmed': False, 'legal_status_confirmed': False, 'limitation': LIMITATION,
               'previous_report_id': old.get('id')}
@@ -167,16 +227,21 @@ def catalog(project):
 
     for source in SOURCES:
         receive(source, sessions=source['id'] == 'pzz2026')
+    result['history_source_id'] = history_id
+    result['sources'].extend(history_sources)
+    for url, refs in history.items():
+        found.setdefault(url, []).extend(refs)
     if len(found) > MAX_DOCUMENTS:
         raise ValueError('Число документов превышает лимит; прежний каталог сохранён')
     previous = {r['url']: r for r in old.get('items', [])}
     for url, references in sorted(found.items()):
         row = copy.deepcopy(previous.get(url, {}))
         row.update(id=digest(url)[:20], url=url, title=references[0]['title'], listing_references=references,
-                   listing_state='listed', currently_listed=True)
+                   listing_state='listed' if any(r.get('observation_state','received')=='received' for r in references) else 'unknown',
+                   currently_listed=any(r.get('observation_state','received')=='received' for r in references))
         row.setdefault('state', 'pending')
         result['items'].append(row)
-    errors = {x['url'] for x in result['sources'] if x['state'] == 'error'}
+    errors = {x['url'] for x in result['sources'] if x['state'] in ('error','retained')}
     for url, old_row in previous.items():
         if url not in found:
             row = copy.deepcopy(old_row)
@@ -192,6 +257,8 @@ def catalog(project):
         current = store.get_setting('planning_watch_' + project) or {}
         if current.get('id') != old.get('id'):
             raise ValueError('Каталог района изменился во время получения; прежний результат не заменён')
+        if (store.get_setting('planning_boundary_' + project) or {}).get('id') != history_id:
+            raise ValueError('Перечни ГП/ПЗЗ изменились во время получения; каталог не заменён')
         save(project, result)
     with store.connect() as db:
         store.event(db, project, 'planning_catalog', {'id': result['id'], 'documents': len(result['items']), 'source_errors': len(errors)})
@@ -200,7 +267,7 @@ def catalog(project):
 
 MONTHS = {'января': '01', 'февраля': '02', 'марта': '03', 'апреля': '04', 'мая': '05', 'июня': '06',
           'июля': '07', 'августа': '08', 'сентября': '09', 'октября': '10', 'ноября': '11', 'декабря': '12'}
-DATE = r'(\d{1,2}\.\d{2}\.\d{4}|\d{1,2}\s+(?:' + '|'.join(MONTHS) + r')\s+\d{4})'
+DATE = r'(\d{1,2}\.\d{2}\.\d{4}|\d{1,2}(?:\.\s*|\s+)(?:' + '|'.join(MONTHS) + r')\s+\d{4})'
 NUMBER = r'(\d+(?:\s*[-–]\s*[а-яё0-9]+)?)'
 
 
@@ -209,6 +276,7 @@ def identity(text):
     if not match:
         return None
     date, number = match.group(1).lower(), re.sub(r'\s+', '', match.group(2).lower()).replace('–', '-')
+    date = re.sub(r'(\d{1,2})\.\s*([а-яё])', r'\1 \2', date)
     if '.' in date:
         day, month, year = date.split('.')
     else:
@@ -221,7 +289,10 @@ def identity(text):
 def text_evidence(pages):
     first = pages[0][1] if pages else ''
     head = re.search(r'\b(ПОСТАНОВЛЕНИЕ|РЕШЕНИЕ)\b', first[:1000], re.I)
-    own = identity(first[head.end():head.end() + 250]) if head else None
+    # Stop before the title: an unreadable header must never inherit the base
+    # act's identity from “О внесении изменений в решение от ...”.
+    header = re.split(r'\n\s*(?:О\s+|Об\s+|Рассмотрев\b|В соответствии\b)', first[head.end():], maxsplit=1, flags=re.I)[0][:250] if head else ''
+    own = identity(header) if head else None
     draft = bool(head and re.search(r'\bпроект\b', first[:head.start()], re.I))
     full = '\n'.join(t for _, t in pages)
     operative = re.search(r'(?:ПОСТАНОВЛЯЕТ|решил[аи]?)\s*:', full, re.I)
@@ -271,6 +342,8 @@ def compare_listing(row):
 
 
 def read_pdf(sha):
+    if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha):
+        raise ValueError('Некорректный SHA-256 сохранённого PDF')
     path = store.DATA / 'planning_watch' / (sha + '.pdf')
     opts = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
     try:
@@ -295,9 +368,12 @@ def read(project, params):
     retry = params.get('retry', False)
     if not isinstance(retry, bool):
         raise ValueError('Некорректный параметр повтора')
+    scope = params.get('scope', 'all')
+    if scope not in ('all', 'pzz'):
+        raise ValueError('Неизвестная область чтения документов')
     result = copy.deepcopy(old)
     result['previous_report_id'] = old['id']
-    available = [r for r in result['items'] if r['currently_listed'] and (r.get('read_revision') != result['catalog_revision'] or (retry and r.get('read_attempt', {}).get('state') == 'error'))]
+    available = [r for r in result['items'] if r['currently_listed'] and (scope=='all' or is_pzz(r)) and (r.get('read_revision') != result['catalog_revision'] or (retry and r.get('read_attempt', {}).get('state') == 'error'))]
     selected = sorted(available, key=lambda r: r.get('read_revision') == result['catalog_revision'])[:BATCH]
     if not selected:
         return {'processed': 0, 'remaining': 0}
@@ -336,7 +412,46 @@ def read(project, params):
         save(project, result)
         with store.connect() as db:
             store.event(db, project, 'planning_read', {'id': result['id'], 'processed': len(selected), 'errors': sum(r['read_attempt']['state'] == 'error' for r in selected)})
-    return {'processed': len(selected), 'remaining': sum(r.get('read_revision') != result['catalog_revision'] and r['currently_listed'] for r in result['items'])}
+    return {'processed': len(selected), 'remaining': sum(r.get('read_revision') != result['catalog_revision'] and r['currently_listed'] and (scope=='all' or is_pzz(r)) for r in result['items'])}
+
+
+def needs_reprocess(row, scope='all', retry=False):
+    return (row.get('state') == 'read' and row.get('algorithm') != ALGORITHM
+            and (scope == 'all' or is_pzz(row))
+            and (retry or row.get('reprocess_attempt', {}).get('algorithm') != ALGORITHM))
+
+
+def reprocess(project, params):
+    """Reparse at most three verified cached PDFs; keep download observations intact."""
+    old = store.get_setting('planning_watch_' + project)
+    if not old or params.get('id') != old['id']:
+        raise ValueError('Каталог района изменился; обновите отчёт')
+    scope, retry = params.get('scope', 'all'), params.get('retry', False)
+    if scope not in ('all', 'pzz') or not isinstance(retry, bool):
+        raise ValueError('Некорректные параметры локального перечтения')
+    result = copy.deepcopy(old)
+    selected = [r for r in result['items'] if needs_reprocess(r, scope, retry)][:BATCH]
+    if not selected:
+        return {'processed': 0, 'remaining': 0}
+    result['previous_report_id'] = old['id']
+    for row in selected:
+        attempt = {'checked_at': store.now(), 'algorithm': ALGORITHM, 'state': 'error'}
+        try:
+            details = read_pdf(row.get('sha256'))
+            row.update(details, parsed_at=store.now())
+            compare_listing(row)
+            attempt.update(state='read', sha256=row['sha256'])
+        except Exception as exc:
+            attempt['error'] = str(exc)[:500]
+        row['reprocess_attempt'] = attempt
+    with store.LOCK:
+        if (store.get_setting('planning_watch_' + project) or {}).get('id') != old['id']:
+            raise ValueError('Каталог района изменился во время перечтения; прежний результат не заменён')
+        save(project, result)
+        with store.connect() as db:
+            store.event(db, project, 'planning_reprocess', {'id': result['id'], 'processed': len(selected),
+                'errors': sum(r['reprocess_attempt']['state'] == 'error' for r in selected)})
+    return {'processed': len(selected), 'remaining': sum(needs_reprocess(r, scope) for r in result['items'])}
 
 
 def report(project):
@@ -345,15 +460,17 @@ def report(project):
         return {'result': None, 'limitation': LIMITATION}
     result = copy.deepcopy(result)
     timelines = {}
-    pzz_root = next((s['url'] for s in SOURCES if s['id'] == 'pzz2026'), None)
     for row in result['items']:
         compare_listing(row)
         row['current_read_state'] = 'unchecked' if row.get('read_revision') != result['catalog_revision'] else row.get('read_attempt', {}).get('state', 'unchecked')
+        row['parser_current'] = row.get('state') == 'read' and row.get('algorithm') == ALGORITHM
+        row['reprocess_eligible'] = needs_reprocess(row)
+        row['reprocess_retry_eligible'] = needs_reprocess(row, retry=True)
         row['same_bytes_municipal'] = [{'url': r['url'], 'received_at': r.get('received_at')} for r in (store.get_setting('municipal_' + project) or {}).get('items', []) if row.get('sha256') and r.get('sha256') == row['sha256']]
         row['reference_matches'] = [dict(ref, observed_documents=[r['id'] for r in result['items'] if r.get('act_identity') == {k: ref[k] for k in ('date', 'number')}]) for ref in row.get('references', [])]
         if row.get('act_identity') and row.get('document_role') == 'act_text':
             groups = list(row.get('subjects', []))
-            if pzz_root and any(r.get('root_url') == pzz_root for r in row['listing_references']):
+            if is_pzz(row):
                 groups.append('ПЗЗ Трудовского — отбор по перечню')
             for group in groups:
                 key = digest([row['act_identity'], row.get('sha256')])
@@ -363,7 +480,9 @@ def report(project):
                 entry['listing_conflicts'].extend(row['listing_conflicts'])
     chronological = [{'subject': name, 'entries': sorted(entries.values(), key=lambda x: (x['date'], x['number'])),
                        'legal_status_confirmed': False} for name, entries in timelines.items()]
-    return {'result': result, 'timelines': chronological, 'limitation': LIMITATION}
+    history_stale=bool(result.get('history_source_id') and result['history_source_id']!=(store.get_setting('planning_boundary_'+project) or {}).get('id'))
+    return {'result': result, 'timelines': chronological, 'limitation': LIMITATION,'history_stale':history_stale,
+            'reprocess_remaining': sum(needs_reprocess(r) for r in result['items'])}
 
 
 def html_report(project):
@@ -380,7 +499,8 @@ def html_report(project):
                         + esc(f"{row.get('processed_pages', 0)}/{row.get('total_pages', '?')}; без текста: {row.get('image_or_sparse_pages', [])}")
                         + '</p><pre>' + esc(json.dumps({'публикации': row['listing_references'], 'конфликты': row.get('listing_conflicts', []),
                                                       'ссылки_на_акты': row.get('reference_matches', []), 'совпадения_PDF': row.get('same_bytes_municipal', []),
-                                                      'последняя_попытка': row.get('read_attempt')}, ensure_ascii=False, indent=2)) + '</pre></section>')
+                                                      'последняя_попытка': row.get('read_attempt'), 'разборщик_актуален': row['parser_current'],
+                                                      'локальное_перечтение': row.get('reprocess_attempt')}, ensure_ascii=False, indent=2)) + '</pre></section>')
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>История документов района</title>'
             '<style>body{font:16px/1.5 sans-serif;max-width:1100px;margin:32px auto;padding:0 20px;color:#253125}'
             'section{border-top:1px solid #bbc6b7;margin-top:28px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f5ef;padding:16px}'

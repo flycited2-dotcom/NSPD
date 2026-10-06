@@ -371,6 +371,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Историческая граница и перечни ГП/ПЗЗ', lambda: planning_boundary.run(project, data)))
             if path == '/api/planning/read':
                 return self.send(launch_job(project, 'Версии и реквизиты PDF района', lambda: planning_watch.read(project, data)))
+            if path == '/api/planning/reprocess':
+                return self.send(launch_job(project, 'Локальное перечтение PDF района', lambda: planning_watch.reprocess(project, data)))
             if path == '/api/planning/maps':
                 return self.send(launch_job(project, 'Карты приложений ПЗЗ', lambda: planning_maps.run(project, data)))
             if path == '/api/torgi':

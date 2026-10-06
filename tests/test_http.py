@@ -117,7 +117,7 @@ def test_district_report_and_protected_operations(server, monkeypatch):
     with request(server,'/api/planning/report') as r:
         assert 'text/html' in r.headers['Content-Type']
         assert 'Документы района'.encode() in r.read()
-    for path in ('/api/planning/catalog','/api/planning/read'):
+    for path in ('/api/planning/catalog','/api/planning/read','/api/planning/reprocess'):
         with pytest.raises(urllib.error.HTTPError) as error:
             request(server,path,{},token=False)
         assert error.value.code==403

@@ -24,9 +24,8 @@ WARNING = ('Это карты из ограниченного каталога �
 
 
 def selected(catalog):
-    root = next(s['url'] for s in planning_watch.SOURCES if s['id'] == 'pzz2026')
     rows = [r for r in (catalog or {}).get('items', []) if r.get('currently_listed') and r.get('state') == 'read'
-            and any(ref.get('root_url') == root for ref in r.get('listing_references', []))]
+            and planning_watch.is_pzz(r)]
     if len(rows) > MAX_DOCUMENTS:
         raise ValueError('Слишком много PDF ПЗЗ для ограниченного анализа')
     return rows

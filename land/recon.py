@@ -10,11 +10,11 @@ from urllib.parse import urlparse
 from shapely.affinity import rotate
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary
+from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch
 from .geometry import convert, polygons
 from .review import CHECKS
 
-VERSION=4
+VERSION=5
 KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
@@ -118,6 +118,15 @@ def document_context(values,numbers):
             found.append({'title':row.get('title','Документ'),'url':safe_url(row.get('url')),'received_at':row.get('received_at'),
                           'sha256':row.get('sha256'),'numbers':sorted({m['cadastral_number'] for m in mentions}),'scope':'Упоминание номера; применимость к контуру не установлена'})
     maps=values.get('planning_maps') or {};catalog=values.get('planning_watch') or {}
+    for doc in catalog.get('items',[]):
+        mentions=[m for m in doc.get('mentions',[]) if torgi.canonical(m.get('cadastral_number')) in numbers]
+        if doc.get('state')=='read' and planning_watch.is_pzz(doc) and mentions:
+            found.append({'title':'Изменение ПЗЗ: '+doc.get('title','Документ'),'url':safe_url(doc.get('url')),
+                          'received_at':doc.get('received_at'),'sha256':doc.get('sha256'),
+                          'numbers':sorted({m['cadastral_number'] for m in mentions}),
+                          'pages':sorted({page for m in mentions for page in m.get('pages',[])}), 'act_identity':doc.get('act_identity'),
+                          'parser_current':doc.get('algorithm')==planning_watch.ALGORITHM,
+                          'scope':'Упоминание близкого кадастрового номера в тексте ПЗЗ; граница зоны и применимость к контуру не установлены'})
     if catalog.get('id') and maps.get('planning_id')==catalog['id']:
         for doc in maps.get('documents',[]):
             for page in doc.get('map_pages',[]):
@@ -125,6 +134,21 @@ def document_context(values,numbers):
                 if mentioned:found.append({'title':'Карта изменения ПЗЗ','url':safe_url(doc.get('url')),'received_at':doc.get('received_at'),
                                           'sha256':doc.get('sha256'),'page':page['page'],'numbers':mentioned,'scope':'Кадастровое упоминание, не граница зоны'})
     return found[:30]
+
+
+def history_documents(values):
+    history=values.get('planning_boundary') or {};catalog=values.get('planning_watch') or {}
+    documents={r['url']:r for r in catalog.get('items',[]) if r.get('state')=='read' and r.get('sha256') and r.get('received_at')}
+    items=copy.deepcopy(history.get('history',{}).get('items',[]))
+    for item in items:
+        row=documents.get(item['url'])
+        item['document_read']=bool(row)
+        if row:
+            item['text_observation']={k:copy.deepcopy(row.get(k)) for k in ('received_at','sha256','parsed_at','act_identity','total_pages','processed_pages','image_or_sparse_pages')}
+            item['text_observation'].update(catalog_id=catalog.get('id'),parser_current=row.get('algorithm')==planning_watch.ALGORITHM,
+                catalog_matches_history=catalog.get('history_source_id')==history.get('id'),
+                listing_conflicts=copy.deepcopy(row.get('listing_conflicts',[])),legal_status_confirmed=False,geometry_confirmed=False)
+    return items
 
 
 def build(values,params):
@@ -212,7 +236,7 @@ def build(values,params):
              'historical_boundary':{'id':(historical or {}).get('id'),'applied':bool(historical_geometries),
                                     'source':copy.deepcopy((historical or {}).get('source')),'limitation':planning_boundary.LIMITATION,
                                     'current_boundary_confirmed':False,'crs_confirmed':False,
-                                    'history':{'items':copy.deepcopy((historical or {}).get('history',{}).get('items',[])),
+                                    'history':{'items':history_documents(values),
                                                'page_count':len((historical or {}).get('history',{}).get('pages',[])),
                                                'all_observed_pages_received':(historical or {}).get('history',{}).get('all_observed_pages_received',False),
                                                'scope':(historical or {}).get('history',{}).get('scope'),'complete':False}},
@@ -362,6 +386,6 @@ def html_report(data,candidate_id=None):
             +'<h1>Поиск участков: рабочее досье</h1><p>'+esc(WARNING)+'</p><p>'+('Предыдущая версия: источники изменились.' if data.get('stale') else 'Датированная версия расчёта.')+'</p><p>Расчёт '+esc(result.get('created_at'))+'; цель '+esc(PURPOSES.get(result.get('parameters',{}).get('purpose'),'Не выбрана'))+'.</p>'
             +'<p>Подтверждённых свободных участков: 0. Досье не является СРЗУ или заявлением.</p>'
             +''.join('<p>'+esc(w)+'</p>' for w in result.get('operation_warnings',[]))+''.join(blocks)
-            +'<h2>Ссылки из перечней ГП/ПЗЗ</h2><p>Документы относятся к поселению. Применимость к этому контуру и вступление в силу не подтверждены; PDF этой проверкой не прочитаны.</p><ul>'
-            +''.join('<li><a href="'+esc(safe_url(item['url']))+'">'+esc(item['title'])+'</a> · '+esc(json.dumps(item['references'],ensure_ascii=False))+'</li>' for item in result.get('sources',{}).get('historical_boundary',{}).get('history',{}).get('items',[]))
+            +'<h2>Ссылки из перечней ГП/ПЗЗ</h2><p>Документы относятся к поселению. Состояние чтения текста показано отдельно для каждого PDF. Применимость к этому контуру и вступление в силу не подтверждены.</p><ul>'
+            +''.join('<li><a href="'+esc(safe_url(item['url']))+'">'+esc(item['title'])+'</a> · '+('текст прочитан' if item.get('document_read') else 'PDF не прочитан')+' · '+esc(json.dumps({'перечни':item['references'],'чтение':item.get('text_observation')},ensure_ascii=False))+'</li>' for item in result.get('sources',{}).get('historical_boundary',{}).get('history',{}).get('items',[]))
             +'</ul><h2>Источники и даты</h2><pre>'+esc(json.dumps(result.get('sources',{}),ensure_ascii=False,indent=2))+'</pre></html>').encode('utf-8')
