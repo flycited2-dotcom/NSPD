@@ -210,3 +210,84 @@ def test_retry_access_failure_keeps_unattempted_observations(db,monkeypatch):
     assert r['geometry_unchecked_numbers']==numbers[1:]
     assert all(r['geometries'][n]==observations[n] for n in numbers[1:])
     assert store.get_setting('torgi_geometry_attempt_trudovoe')['state']=='partial'
+
+
+def rematch_fixture():
+    s=pilot();s['id']='fresh-survey'
+    rows=[torgi.normalize(lot()),torgi.normalize(lot('21000000000000000001_2',cad='90:12:172301:999'))]
+    old={'id':'old','created_at':'search-date','pages':[{'received_at':'page-date'}],'lots':rows,'survey_id':'earlier',
+         'geometries':{'90:12:172301:102':{'lookup':True,'state':'received','features':[],'received_at':'old-lookup-date'},
+                       '90:12:172301:999':{'lookup':True,'state':'not_returned','features':[],'received_at':'failure-date'}}}
+    return old,s
+
+
+def test_local_rematch_preserves_dates_and_prioritizes_current_survey(db,monkeypatch):
+    old,s=rematch_fixture();store.set_setting('torgi_trudovoe',old);store.set_setting('survey_trudovoe',s)
+    store.set_setting('torgi_documents_trudovoe',{'id':'files','search_id':'old','files':{}})
+    monkeypatch.setattr(torgi,'fetch',lambda *args:pytest.fail('unexpected search download'))
+    monkeypatch.setattr(torgi.nspd,'request_json',lambda *args:pytest.fail('unexpected NSPD request'))
+    answer=torgi.rematch('trudovoe',{'id':'old','survey_id':s['id']})
+    result=store.get_setting('torgi_trudovoe')
+    assert answer['count']==1 and answer['unlocated_numbers']==1 and answer['network_requests']==0
+    assert result['created_at']==old['created_at'] and result['pages']==old['pages']
+    assert result['parent_id']==result['search_source_id']=='old' and result['survey_id']==s['id']
+    assert result['geometries']['90:12:172301:102']['received_at']=='old'
+    assert result['geometries']['90:12:172301:999']['received_at']=='failure-date'
+    assert result['lots'][0]['in_survey'] and not result['lots'][0]['geometry_confirmed']
+    assert store.get_setting('torgi_documents_trudovoe')['id']=='files' and not store.candidates('trudovoe')
+
+
+@pytest.mark.parametrize('params',[{'id':'stale','survey_id':'fresh-survey'},{'id':'old','survey_id':'stale'}])
+def test_local_rematch_rejects_stale_inputs(db,params):
+    old,s=rematch_fixture();store.set_setting('torgi_trudovoe',old);store.set_setting('survey_trudovoe',s)
+    with pytest.raises(ValueError):torgi.rematch('trudovoe',params)
+    assert store.get_setting('torgi_trudovoe')==old
+
+
+@pytest.mark.parametrize('changed',['survey','torgi'])
+def test_local_rematch_does_not_overwrite_concurrent_revision(db,monkeypatch,changed):
+    old,s=rematch_fixture();store.set_setting('torgi_trudovoe',old);store.set_setting('survey_trudovoe',s)
+    original=torgi.relate
+    def relate(*args):
+        result=original(*args);store.set_setting(changed+'_trudovoe',{'id':'concurrent'});return result
+    monkeypatch.setattr(torgi,'relate',relate)
+    with pytest.raises(ValueError,match='во время'):torgi.rematch('trudovoe',{'id':'old','survey_id':s['id']})
+    assert store.get_setting(changed+'_trudovoe')['id']=='concurrent'
+    if changed=='survey':assert store.get_setting('torgi_trudovoe')==old
+    assert store.get_setting('torgi_rematch_attempt_trudovoe')['state']=='error'
+
+
+def test_new_search_preserves_dated_lookups_for_current_numbers_only(db,monkeypatch):
+    old,s=rematch_fixture()
+    old['geometries']['90:12:172301:777']={'lookup':True,'state':'received','features':[]}
+    store.set_setting('torgi_trudovoe',old);store.set_setting('survey_trudovoe',s)
+    rows=[lot(),lot('21000000000000000001_2',cad='90:12:172301:999')]
+    monkeypatch.setattr(torgi,'fetch',lambda url:page(rows,0,2,True))
+    torgi.run('trudovoe',{'query':'Трудовое'})
+    result=store.get_setting('torgi_trudovoe')
+    assert result['parent_id']=='old' and result['search_source_id']!='old'
+    assert result['lots'][0]['in_survey'] and result['geometries']['90:12:172301:102']['received_at']=='old'
+    assert result['geometries']['90:12:172301:999']['received_at']=='failure-date'
+    assert '90:12:172301:777' not in result['geometries'] and not result['complete']
+
+
+def test_new_search_guard_preserves_concurrent_search(db,monkeypatch):
+    old,s=rematch_fixture();store.set_setting('torgi_trudovoe',old);store.set_setting('survey_trudovoe',s)
+    monkeypatch.setattr(torgi,'fetch',lambda url:page([lot()],0,1,True))
+    original=torgi.relate
+    def relate(*args):
+        result=original(*args);store.set_setting('torgi_trudovoe',{'id':'concurrent'});return result
+    monkeypatch.setattr(torgi,'relate',relate)
+    with pytest.raises(ValueError,match='во время'):torgi.run('trudovoe',{})
+    assert store.get_setting('torgi_trudovoe')=={'id':'concurrent'}
+
+
+def test_each_remote_search_has_new_identity_even_with_same_dates_and_payload(db,monkeypatch):
+    monkeypatch.setattr(store,'now',lambda:'2026-10-06T08:00:00+00:00')
+    monkeypatch.setattr(torgi,'fetch',lambda url:page([lot()],0,1,True))
+    torgi.run('trudovoe',{})
+    first=store.get_setting('torgi_trudovoe')
+    torgi.run('trudovoe',{})
+    second=store.get_setting('torgi_trudovoe')
+    assert first['pages']==second['pages'] and first['created_at']==second['created_at']
+    assert first['search_source_id']!=second['search_source_id'] and second['parent_id']==first['id']

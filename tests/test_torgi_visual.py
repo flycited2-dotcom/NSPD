@@ -62,6 +62,18 @@ def test_preview_complete_frame_orientation_and_no_metadata():
         assert image.format=='PNG' and not image.getexif() and 'exif' not in image.info
 
 
+def test_visual_processing_tracks_search_source_through_local_revisions(db,monkeypatch):
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','cards':[],'files':{}})
+    search=store.get_setting('torgi_trudovoe');search.update(id='local-revision',search_source_id='search')
+    store.set_setting('torgi_trudovoe',search)
+    monkeypatch.setattr(visual,'read_unit',lambda *a:pytest.fail('unexpected OCR'))
+    assert visual.run('trudovoe',{'id':'docs'})['processed']==0
+    catalog=store.get_setting('torgi_documents_trudovoe')
+    search.update(id='new-search',search_source_id='new-source');store.set_setting('torgi_trudovoe',search)
+    with pytest.raises(ValueError):visual.run('trudovoe',{'id':catalog['id']})
+    assert store.get_setting('torgi_documents_trudovoe')==catalog
+
+
 @pytest.mark.parametrize('raw,fmt',[(b'<html>login</html>','jpg'),(raster('PNG'),'jpg'),(raster()[:100],'jpg'),
                                   (raster(size=(10001,1)),'jpg'),(raster(size=(5100,5100)),'jpg')],
                          ids=['non_image','wrong_format','truncated','side_limit','pixel_limit'])

@@ -20,6 +20,14 @@ MAX_BYTES = 8*1024*1024
 PDF_MAX_BYTES = 16*1024*1024
 READ_FORMATS = ('pdf','docx','doc','rtf',*image_evidence.FORMATS)
 ALGORITHM = 'torgi-file-text-v2'
+
+
+def same_search(search,catalog):
+    if not search or not catalog:return False
+    if search.get('search_source_id'):
+        return (catalog.get('search_source_id') or catalog.get('search_id'))==search['search_source_id']
+    # Legacy searches already retain this date through geometry-only revisions.
+    return catalog.get('search_id')==search.get('id') or bool(catalog.get('search_created_at') and catalog['search_created_at']==search.get('created_at'))
 ROOT = Path(__file__).resolve().parent.parent
 WARNING = 'Файлы извещения могут относиться ко многим лотам. Номер в документе не подтверждает предмет лота, геометрию, действующие условия или доступность земли. Подписи и права не проверены.'
 
@@ -137,7 +145,7 @@ def reprocess_queue(result):
 def reprocess(project,params):
     old=store.get_setting('torgi_documents_'+project)
     search=store.get_setting('torgi_'+project)
-    if not old or params.get('id')!=old['id'] or not search or old['search_id']!=search['id']:
+    if not old or params.get('id')!=old['id'] or not same_search(search,old):
         raise ValueError('Каталог документов/поиск изменился; обновите страницу')
     result=copy.deepcopy(old);selected=reprocess_queue(result)[:BATCH]
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0}
@@ -178,9 +186,9 @@ def metadata(project,params):
     old=store.get_setting('torgi_documents_'+project,{}) or {}
     result=copy.deepcopy(old)
     # A new actual search requires fresh cards; geometry-only updates retain dated cards.
-    same=result.get('search_created_at')==search['created_at']
+    same=same_search(search,result)
     known={lot['id'] for lot in search['lots']}
-    result.update(search_id=search['id'],search_created_at=search['created_at'],warning=WARNING,
+    result.update(search_id=search['id'],search_source_id=torgi.source_id(search),search_created_at=search['created_at'],warning=WARNING,
                   cards=[c for c in old.get('cards',[]) if same and c['lot_id'] in known],geometry_confirmed=False)
     selected=metadata_queue(search,result,retry)[:BATCH]
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected)}
@@ -233,7 +241,7 @@ def extract_file(path,digest,fmt):
 def read(project,params):
     old=store.get_setting('torgi_documents_'+project)
     search=store.get_setting('torgi_'+project)
-    if not old or params.get('id')!=old['id'] or not search or old['search_id']!=search['id']:
+    if not old or params.get('id')!=old['id'] or not same_search(search,old):
         raise ValueError('Каталог документов/поиск изменился; сначала загрузите карточки')
     retry=params.get('retry_errors',False)
     if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')

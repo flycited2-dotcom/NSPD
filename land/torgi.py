@@ -77,6 +77,48 @@ def survey_geometries(result):
     return geometries
 
 
+def source_id(result):
+    return (result or {}).get('search_source_id') or (result or {}).get('id')
+
+
+def combined_geometries(previous,survey,lots):
+    numbers={n for lot in lots for n in lot['cadastral_numbers']}
+    observations={n:copy.deepcopy(o) for n,o in (previous or {}).get('geometries',{}).items() if n in numbers and o.get('lookup')}
+    # The current surveyed geometry takes precedence over a dated number lookup.
+    observations.update(survey_geometries(survey))
+    return observations
+
+
+def rematch(project,params):
+    previous=store.get_setting('torgi_'+project)
+    survey=store.get_setting('survey_'+project)
+    if not previous or params.get('id')!=previous['id']:
+        raise ValueError('Поиск изменился; обновите страницу')
+    if not survey or params.get('survey_id')!=survey['id']:
+        raise ValueError('Обследование изменилось; обновите страницу')
+    attempt={'state':'running','started_at':store.now(),'network_requests':0}
+    store.set_setting('torgi_rematch_attempt_'+project,attempt)
+    try:
+        result=copy.deepcopy(previous)
+        observations=combined_geometries(previous,survey,result['lots'])
+        numbers={n for lot in result['lots'] for n in lot['cadastral_numbers']}
+        missing=sorted(n for n in numbers if not observations.get(n,{}).get('features'))
+        result.update(parent_id=previous['id'],search_source_id=source_id(previous),rematched_at=store.now(),
+                      survey_id=survey['id'],survey_bounds=survey['bounds'],geometries=observations,
+                      lots=relate(result['lots'],observations,survey),rematch_network_requests=0,rematch_unlocated_numbers=missing)
+        with store.LOCK:
+            if (store.get_setting('torgi_'+project) or {}).get('id')!=previous['id'] or (store.get_setting('survey_'+project) or {}).get('id')!=survey['id']:
+                raise ValueError('Поиск или обследование изменились во время сопоставления; результат не записан')
+            persist(project,result)
+            with store.connect() as db:store.event(db,project,'torgi_rematch',{'id':result['id'],'survey_id':survey['id'],'network_requests':0})
+        attempt.update(state='done',finished_at=store.now())
+        return {'id':result['id'],'count':sum(lot['in_survey'] for lot in result['lots']),
+                'unlocated_numbers':len(missing),'lots_without_number':sum(not lot['cadastral_numbers'] for lot in result['lots']),'network_requests':0}
+    except Exception as exc:
+        attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
+    finally:store.set_setting('torgi_rematch_attempt_'+project,attempt)
+
+
 def relate(lots, geometries, survey):
     boundary = box(*survey['bounds']) if survey else None
     metric = f'+proj=laea +lat_0={boundary.centroid.y} +lon_0={boundary.centroid.x} +datum=WGS84 +units=m +no_defs' if boundary else None
@@ -116,6 +158,7 @@ def persist(project, result):
 
 
 def run(project, params):
+    previous=store.get_setting('torgi_'+project)
     query = str(params.get('query', 'Трудовое')).strip()
     if not 2 <= len(query) <= 120 or any(ord(c) < 32 for c in query):
         raise ValueError('Поисковый текст должен содержать от 2 до 120 символов')
@@ -172,11 +215,17 @@ def run(project, params):
         else:
             raise ValueError('Поиск превышает 200 лотов; уточните текст. Предыдущий результат сохранён.')
         survey = store.get_setting('survey_' + project, None)
+        observations=combined_geometries(previous,survey,rows)
+        source_digest=hashlib.sha256(json.dumps({'query':query,'history':history,'pages':pages,'previous_search_source_id':source_id(previous)},sort_keys=True).encode()).hexdigest()[:20]
         result = {'created_at': store.now(), 'query': query, 'history': history, 'region': 'Крым', 'category': 'Земельные участки',
                   'pages': pages, 'reported_total': total, 'query_pages_received': True, 'complete': False, 'warning': WARNING,
                   'survey_id': survey['id'] if survey else None, 'survey_bounds': survey['bounds'] if survey else None,
-                  'lots': relate(rows, survey_geometries(survey), survey), 'geometries': survey_geometries(survey)}
-        persist(project, result)
+                  'lots': relate(rows, observations, survey), 'geometries': observations,
+                  'search_source_id':source_digest,'parent_id':(previous or {}).get('id')}
+        with store.LOCK:
+            if (store.get_setting('torgi_'+project) or {}).get('id')!=(previous or {}).get('id') or (store.get_setting('survey_'+project) or {}).get('id')!=(survey or {}).get('id'):
+                raise ValueError('Поиск или обследование изменились во время загрузки; результат не записан')
+            persist(project, result)
         store.set_setting('torgi_geometry_attempt_' + project, None)
         attempt.update(state='done', finished_at=store.now())
         with store.connect() as db:
@@ -200,9 +249,7 @@ def locate(project, params):
     if not isinstance(retry, bool):
         raise ValueError('Параметр повтора должен быть логическим')
     result = copy.deepcopy(previous)
-    observations = survey_geometries(survey)
-    # Preserve prior remote lookups, but re-relate them to the current survey.
-    observations.update({k:v for k,v in previous.get('geometries', {}).items() if v.get('lookup')})
+    observations = combined_geometries(previous,survey,result['lots'])
     retry_states = {'not_returned', 'not_found', 'rejected'}
     numbers = sorted({n for lot in result['lots'] for n in lot['cadastral_numbers']
                       if n not in observations or observations[n].get('state') == 'error'
@@ -241,7 +288,7 @@ def locate(project, params):
                 break  # no further requests after an access or transport error
             attempt['processed'] += 1
             store.set_setting('torgi_geometry_attempt_' + project, attempt)
-        result.update(parent_id=previous['id'], geometry_checked_at=store.now(), survey_id=survey['id'], survey_bounds=survey['bounds'],
+        result.update(parent_id=previous['id'], search_source_id=source_id(previous), geometry_checked_at=store.now(), survey_id=survey['id'], survey_bounds=survey['bounds'],
                       geometries=observations, lots=relate(result['lots'], observations, survey), geometry_limit=MAX_GEOMETRIES,
                       geometry_unchecked_numbers=[n for n in numbers if n not in checked])
         persist(project, result)

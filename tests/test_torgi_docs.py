@@ -107,6 +107,35 @@ def test_metadata_continues_without_refreshing_dates_and_ignores_geometry_update
     with pytest.raises(ValueError):docs.metadata('trudovoe',{'search_id':'old'})
 
 
+def test_fresh_search_invalidates_cards_even_when_created_at_is_equal(db,monkeypatch):
+    calls=[]
+    def fetch(url,**kw):
+        calls.append(url);return json.dumps(card(int(url.rsplit('_',1)[-1]))).encode(),'application/json',200
+    monkeypatch.setattr(docs,'fetch',fetch)
+    docs.metadata('trudovoe',{'search_id':'search'})
+    old=store.get_setting('torgi_documents_trudovoe')
+    search=store.get_setting('torgi_trudovoe');search.update(id='new-search',search_source_id='fresh-source')
+    store.set_setting('torgi_trudovoe',search)
+    assert not docs.same_search(search,old)
+    docs.metadata('trudovoe',{'search_id':'new-search'})
+    current=store.get_setting('torgi_documents_trudovoe')
+    assert len(calls)==4 and current['search_source_id']=='fresh-source'
+
+
+@pytest.mark.parametrize('operation',[docs.read,docs.reprocess])
+def test_local_search_revision_retains_documents_but_new_source_blocks_processing(db,monkeypatch,operation):
+    catalog={'id':'docs','search_id':'search','cards':[],'files':{}}
+    store.set_setting('torgi_documents_trudovoe',catalog)
+    search=store.get_setting('torgi_trudovoe');search.update(id='local-revision',search_source_id='search')
+    store.set_setting('torgi_trudovoe',search)
+    monkeypatch.setattr(docs,'fetch',lambda *a,**kw:pytest.fail('unexpected source request'))
+    assert operation('trudovoe',{'id':'docs'})['processed']==0
+    current=store.get_setting('torgi_documents_trudovoe')
+    search.update(id='new-search',search_source_id='new-source');store.set_setting('torgi_trudovoe',search)
+    with pytest.raises(ValueError):operation('trudovoe',{'id':current['id']})
+    assert store.get_setting('torgi_documents_trudovoe')==current
+
+
 def test_metadata_transport_stops_and_requires_explicit_retry(db,monkeypatch):
     calls=[]
     def fetch(url,**kw):

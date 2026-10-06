@@ -70,7 +70,7 @@ def read_unit(file, number):
 def run(project, params):
     old = store.get_setting('torgi_documents_' + project)
     search = store.get_setting('torgi_' + project)
-    if not old or params.get('id') != old['id'] or not search or old['search_id'] != search['id']:
+    if not old or params.get('id') != old['id'] or not torgi_docs.same_search(search,old):
         raise ValueError('Каталог/поиск изменился; обновите страницу')
     retry = params.get('retry_errors', False)
     if not isinstance(retry, bool):

@@ -12,11 +12,13 @@ function torgiTable(){
 }
 async function refreshTorgi(){
  const d=await api('/api/torgi');currentTorgi=d.result;
- const a=d.attempt,g=d.geometry_attempt;
+ const a=d.attempt,g=d.geometry_attempt,m=d.rematch_attempt;
  el('torgi-status').textContent=a?`Последний поиск: ${operationState(a.state)} · ${a.started_at} · страниц ${a.pages_received}.${a.error?' '+a.error+' Предыдущий результат сохранён.':''}`:'Поиск ещё не выполнялся.';
  if(g)el('torgi-status').textContent+=`\nГеометрия: ${operationState(g.state)} · проверено ${g.processed} из ${g.requested}.${g.error?' '+g.error:''}`;
+ if(m)el('torgi-status').textContent+=`\nСопоставление сохранённых данных: ${operationState(m.state)} · внешних запросов ${m.network_requests}.${m.error?' '+m.error:''}`;
  if(!currentTorgi)return;
  const r=currentTorgi;torgiStale=r.survey_id!==d.current_survey_id;
+ if(r.rematched_at)el('torgi-status').textContent+=`\nПересопоставлено ${tdate(r.rematched_at)}. Номеров без полученной геометрии: ${r.rematch_unlocated_numbers.length}. Даты загрузки источников сохранены.`;
  el('torgi-status').textContent+=`\nПоказан поиск «${r.query}» от ${r.created_at}: ${r.lots.length} записей, ${r.pages.length} страниц; ${r.history?'все статусы, включая историю':'только опубликованные и приём заявок'}. Совпадений с областью: ${torgiStale?'требует пересопоставления':r.lots.filter(l=>l.in_survey).length}.\n${r.warning}`;
  const geo=Object.values(r.geometries||{}).filter(g=>g.lookup); if(geo.length)el('torgi-status').textContent+=` Проверка номеров: геометрия получена ${geo.filter(g=>g.state==='received').length}; HTTP 404 ${geo.filter(g=>g.state==='not_returned').length}; отклонена ${geo.filter(g=>g.state==='rejected').length}; не проверено ${r.geometry_unchecked_numbers?.length??0}.`;
  el('torgi-export').classList.remove('hidden');torgiTable();tdraw.clearLayers();
@@ -28,15 +30,16 @@ async function refreshTorgi(){
  if(!torgiStale)for(const lot of r.lots)for(const m of lot.spatial_matches||[])L.geoJSON(m.feature,{style:{color:'#8e3f92',weight:3,fillOpacity:.2},onEachFeature:(f,l)=>l.bindPopup(`${escapeHtml(m.cadastral_number)}<br>${escapeHtml(lot.procedure.name)} · ${escapeHtml(statusName(lot.status))}<br><a href="${escapeHtml(lot.url)}" target="_blank" rel="noopener noreferrer">Официальный лот</a>`)}).addTo(tdraw);
  if(typeof refreshTorgiDocs==='function')await refreshTorgiDocs();
 }
-async function runTorgi(geometry=false){
+async function runTorgi(geometry=false,local=false){
  if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
- el('torgi-status').textContent=geometry?'Проверка геометрии по кадастровым номерам в НСПД…':'Загрузка страниц ГИС Торги…';
- try{const job=await api(geometry?'/api/torgi/geometry':'/api/torgi',geometry?{id:currentTorgi?.id,retry_missing:el('torgi-retry').checked}:{query:el('torgi-query').value,history:el('torgi-history').checked});let s;
+ el('torgi-status').textContent=local?'Сопоставление сохранённых данных с текущей областью…':geometry?'Проверка геометрии по кадастровым номерам в НСПД…':'Загрузка страниц ГИС Торги…';
+ try{const job=await api(local?'/api/torgi/rematch':geometry?'/api/torgi/geometry':'/api/torgi',local?{id:currentTorgi?.id,survey_id:currentSurvey?.id}:geometry?{id:currentTorgi?.id,retry_missing:el('torgi-retry').checked}:{query:el('torgi-query').value,history:el('torgi-history').checked});let s;
  do{await new Promise(r=>setTimeout(r,1000));s=await api('/api/jobs/'+job.job_id);await refreshTorgi()}while(s.state==='running');
  if(s.state==='error')throw Error(s.error);
  }catch(e){el('torgi-status').textContent+='\nНе выполнено: '+e.message}
  finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
 }
 el('torgi-run').addEventListener('click',()=>runTorgi());el('torgi-locate').addEventListener('click',()=>runTorgi(true));
+el('torgi-rematch').addEventListener('click',()=>runTorgi(false,true));
 el('torgi-area-only').addEventListener('change',torgiTable);
 refreshTorgi().catch(e=>el('torgi-status').textContent=e.message);

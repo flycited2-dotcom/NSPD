@@ -171,8 +171,9 @@ class Handler(BaseHTTPRequestHandler):
                 if reading and reading['state']=='running' and not active:reading=dict(reading,state='interrupted')
                 if reprocessing and reprocessing['state']=='running' and not active:reprocessing=dict(reprocessing,state='interrupted')
                 if visual and visual['state']=='running' and not active:visual=dict(visual,state='interrupted')
-                same = result and search and result.get('search_created_at')==search['created_at']
+                same = torgi_docs.same_search(search,result)
                 return self.send({'result':result,'attempt':attempt,'reading_attempt':reading,'reprocess_attempt':reprocessing,'current_search_id':(search or {}).get('id'),
+                                  'current_search_source_id':torgi.source_id(search),'search_stale':bool(result and not same),
                                   'visual_attempt':visual,'visual_remaining':len(torgi_visual.queue(result or {})),
                                   'cards_remaining':len(torgi_docs.metadata_queue(search,result if same else {})) if search else 0,
                                   'files_to_reprocess':len(torgi_docs.reprocess_queue(result or {})),
@@ -223,6 +224,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = store.get_setting('torgi_' + project, None)
                 attempt = store.get_setting('torgi_attempt_' + project, None)
                 geometry_attempt = store.get_setting('torgi_geometry_attempt_' + project, None)
+                rematch_attempt = store.get_setting('torgi_rematch_attempt_' + project, None)
                 with JOB_LOCK:
                     active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
                 if not active:
@@ -230,7 +232,9 @@ class Handler(BaseHTTPRequestHandler):
                         attempt = dict(attempt, state='interrupted')
                     if geometry_attempt and geometry_attempt['state'] == 'running':
                         geometry_attempt = dict(geometry_attempt, state='interrupted')
-                return self.send({'result': result, 'attempt': attempt, 'geometry_attempt': geometry_attempt,
+                    if rematch_attempt and rematch_attempt['state'] == 'running':
+                        rematch_attempt = dict(rematch_attempt, state='interrupted')
+                return self.send({'result': result, 'attempt': attempt, 'geometry_attempt': geometry_attempt,'rematch_attempt':rematch_attempt,
                                   'current_survey_id': (store.get_setting('survey_' + project, {}) or {}).get('id')},
                                  filename='torgi-observed.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/survey', '/api/survey/export'):
@@ -353,6 +357,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Поиск лотов ГИС Торги', lambda: torgi.run(project, data)))
             if path == '/api/torgi/geometry':
                 return self.send(launch_job(project, 'Сопоставление лотов с областью', lambda: torgi.locate(project, data)))
+            if path == '/api/torgi/rematch':
+                return self.send(launch_job(project, 'Сопоставление сохранённых лотов', lambda: torgi.rematch(project, data)))
             if path == '/api/survey/watch':
                 with store.LOCK:
                     result = store.get_setting('survey_' + project, {})

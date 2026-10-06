@@ -290,6 +290,34 @@ def test_torgi_documents_export_preserves_scope_and_interruption(server):
     assert exc.value.code==403
 
 
+@pytest.mark.parametrize('source,stale',[('original',False),('new-source',True)])
+def test_torgi_documents_export_uses_source_identity(server,source,stale):
+    store.set_setting('torgi_trudovoe',{'id':'revision','search_source_id':source,'created_at':'same-date','lots':[]})
+    store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'original','search_created_at':'same-date','cards':[],'files':{}})
+    with request(server,'/api/torgi/documents/export') as r:body=json.load(r)
+    assert body['search_stale'] is stale and body['current_search_source_id']==source
+
+
+def test_torgi_rematch_export_interruption_authorization_and_job(server,monkeypatch):
+    import time
+    store.set_setting('torgi_rematch_attempt_trudovoe',{'state':'running','network_requests':0})
+    with request(server,'/api/torgi/export') as r:body=json.load(r)
+    assert body['rematch_attempt']['state']=='interrupted' and body['rematch_attempt']['network_requests']==0
+    with pytest.raises(urllib.error.HTTPError) as exc:request(server,'/api/torgi/rematch',{},token=False)
+    assert exc.value.code==403
+    calls=[]
+    def rematch(project,params):
+        calls.append((project,params));return {'network_requests':0}
+    monkeypatch.setattr(app.torgi,'rematch',rematch)
+    with request(server,'/api/torgi/rematch',{'id':'search','survey_id':'survey'}) as r:job_id=json.load(r)['job_id']
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as r:job=json.load(r)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done' and job['result']=={'network_requests':0}
+    assert calls==[('trudovoe',{'id':'search','survey_id':'survey'})]
+
+
 def test_torgi_local_reprocess_export_queue_and_post_guard(server):
     store.set_setting('torgi_trudovoe',{'id':'search','created_at':'date','lots':[]})
     store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','search_created_at':'date','cards':[],
