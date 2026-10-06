@@ -18,7 +18,7 @@ def payload(geom,options=None):
 
 def test_catalog_categories_are_observed_not_guessed():
     rows=nspd_context.catalog()
-    assert {k:v['categoryId'] for k,v in rows.items()}=={'settlements':472812,'quarters':36381,'schemes':38943,'planned_parcels':37158,'red_lines':38942}
+    assert {k:v['categoryId'] for k,v in rows.items()}=={'settlements':472812,'quarters':36381,'schemes':38943,'planned_parcels':37158,'red_lines':38942,'water':472813,'forests':472847,'protected':472825,'heritage':472820}
 
 
 def test_red_lines_explicitly_allow_lines_while_primary_normalizer_rejects_them():
@@ -37,7 +37,7 @@ def test_collection_distinguishes_empty_received_error_and_no_retry(tmp_path,mon
         data=payload(LineString([(34.20,44.99),(34.21,45.0)])) if category==38942 else {'type':'FeatureCollection','features':[]}
         return data,'hash-'+str(category)
     monkeypatch.setattr(nspd,'request_json',request);monkeypatch.setattr(store,'DATA',tmp_path);store.init()
-    result=nspd_context.collect(BOUNDS);assert len(calls)==len(set(calls))==5
+    result=nspd_context.collect(BOUNDS);assert len(calls)==len(set(calls))==9
     assert result['layers']['schemes']['state']=='error' and '403' in result['layers']['schemes']['error']
     assert result['layers']['settlements']['state']=='received' and result['layers']['settlements']['count']==0
     assert result['layers']['red_lines']['geojson']['features'][0]['geometry']['type']=='LineString'
@@ -75,6 +75,33 @@ def test_planned_footprints_excluded_optionally_and_not_claimed_to_be_legally_un
     included=recon.build(values,recon.options({'avoid_planned':False}))
     assert included['summary']['drafts'] and all(not c['rights_confirmed'] for c in included['candidates'])
     assert all(c['context_matches'][mode] and not c['context_matches'][mode][0]['applies_legally_confirmed'] for c in included['candidates'])
+
+
+@pytest.mark.parametrize('mode',nspd_context.ENVIRONMENT)
+def test_environment_exclusion_is_independent_of_planned_switch_and_does_not_infer_legal_ban(mode):
+    values=fixture();values['nspd_context']=context(mode,box(*BOUNDS))
+    excluded=recon.build(values,recon.options({'avoid_planned':False}))
+    assert not excluded['summary']['drafts'] and all(c['context_matches'][mode] for c in excluded['candidates'])
+    included=recon.build(values,recon.options({'avoid_environment':False}))
+    assert included['summary']['drafts'] and all(not c['rights_confirmed'] for c in included['candidates'])
+    assert all(not c['context_matches'][mode][0]['applies_legally_confirmed'] for c in included['candidates'])
+
+
+def test_old_context_missing_environment_is_not_reported_as_empty_received_layer():
+    old=context('quarters',box(*BOUNDS));result=nspd_context.sources(old,BOUNDS)
+    assert result['applied'] and result['layers']['water']['state']=='not_available'
+    assert result['layers']['water']['title']==nspd_context.TITLES['water'] and 'count' not in result['layers']['water']
+
+
+def test_algorithm_revision_invalidates_results_and_saved_candidates_even_if_sources_unchanged(tmp_path,monkeypatch):
+    monkeypatch.setattr(store,'DATA',tmp_path);store.init()
+    for k,v in fixture().items():store.set_setting(k+'_trudovoe',v)
+    recon.run('trudovoe',{'bounds':BOUNDS,'refresh_nspd':False})
+    result=recon.report('trudovoe')['result'];recon.watch('trudovoe',{'result_id':result['id'],'id':result['candidates'][0]['id']})
+    monkeypatch.setattr(recon,'VERSION',recon.VERSION+1)
+    data=recon.report('trudovoe');assert data['stale'] and data['watchlist'][0]['stale']
+    assert recon.load('trudovoe',result['id'])['stale']
+    with pytest.raises(ValueError):recon.watch('trudovoe',{'result_id':result['id'],'id':result['candidates'][0]['id']})
 
 
 def test_unrelated_bounds_never_apply_cached_planned_footprint_or_counters():

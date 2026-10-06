@@ -13,7 +13,12 @@ TITLES={
     'schemes':'Земельные участки, образуемые по схеме расположения земельного участка',
     'planned_parcels':'Земельные участки, образуемые по проекту межевания территории',
     'red_lines':'Красные линии',
+    'water':'Береговые линии (границы водных объектов) (полигональный)',
+    'forests':'Лесничества',
+    'protected':'Особо охраняемые природные территории',
+    'heritage':'Территории объектов культурного наследия',
 }
+ENVIRONMENT=('water','forests','protected','heritage')
 COUNTERS=('cnt_land','cnt_land_geom','cnt_land_not_geom','cnt_oks','cnt_oks_geom','cnt_oks_not_geom')
 FIELDS=COUNTERS+('is_actual','is_conditional','status','date_cr','reg_numb_border','name')
 WARNING='Пустой ответ не подтверждает отсутствие схем, красных линий или границ. Счётчики квартала относятся ко всему кварталу, а не к выделенной области; положение объектов без геометрии неизвестно. Действующая редакция документов и права не установлены.'
@@ -107,6 +112,8 @@ def flags(matches):
     if matches['schemes']:result.append('Есть пересечение с полученными схемами расположения участков; проверить опубликованную процедуру')
     if matches['planned_parcels']:result.append('Есть пересечение с участками по проекту межевания; проверить документ и статус')
     if matches['red_lines']:result.append('Есть пересечение с полученными красными линиями; требуется проверка документа')
+    for mode in ENVIRONMENT:
+        if matches[mode]:result.append('Есть пересечение: '+TITLES[mode]+'; режим территории и допустимость использования требуют проверки')
     for mode,rows in matches.items():
         if any(row.get('observation_state')=='retained' for row in rows):result.append(TITLES[mode]+': использовано прежнее датированное наблюдение; обновление не удалось')
     return result
@@ -115,4 +122,4 @@ def flags(matches):
 def sources(context,bounds):
     used=applicable(context,bounds)
     return {'id':(context or {}).get('id'),'applied':used,'complete':False,'warning':WARNING,
-            'layers':{mode:({k:row.get(k) for k in ('title','state','received_at','checked_at','sha256','count','error','source','category_id','retained_from_context_id')} if used else {'title':TITLES[mode],'state':'not_available'}) for mode,row in ((mode,(context or {}).get('layers',{}).get(mode,{})) for mode in TITLES)}}
+            'layers':{mode:({k:row.get(k) for k in ('title','state','received_at','checked_at','sha256','count','error','source','category_id','retained_from_context_id')} if used and row else {'title':TITLES[mode],'state':'not_available'}) for mode,row in ((mode,(context or {}).get('layers',{}).get(mode,{})) for mode in TITLES)}}
