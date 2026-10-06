@@ -10,12 +10,12 @@ from urllib.parse import urlparse
 from shapely.affinity import rotate
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-from . import store, survey, nspd, torgi, torgi_docs
+from . import store, survey, nspd, nspd_context, torgi, torgi_docs
 from .geometry import convert, polygons
 from .review import CHECKS
 
-VERSION=1
-KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps')
+VERSION=2
+KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
 HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru'}
@@ -25,13 +25,13 @@ def options(params):
     result=survey.parameters(params)
     result.update(purpose=params.get('purpose','unspecified'),target_area=float(params.get('target_area',1000)),
                   limit=params.get('limit',10),refresh_nspd=params.get('refresh_nspd',True),
-                  refresh_torgi=params.get('refresh_torgi',False),avoid_restrictions=params.get('avoid_restrictions',True),query=str(params.get('query','Трудовое')).strip())
+                  refresh_torgi=params.get('refresh_torgi',False),avoid_restrictions=params.get('avoid_restrictions',True),avoid_planned=params.get('avoid_planned',True),query=str(params.get('query','Трудовое')).strip())
     if result['purpose'] not in PURPOSES:raise ValueError('Неизвестная цель использования')
     if not math.isfinite(result['target_area']) or not result['min_area']<=result['target_area']<=result['max_area']:
         raise ValueError('Площадь пробного контура должна находиться между минимальной и максимальной')
     if math.sqrt(result['target_area'])<result['min_width']:raise ValueError('Выбранная площадь меньше квадрата заданной ширины')
     if isinstance(result['limit'],bool) or not isinstance(result['limit'],int) or not 1<=result['limit']<=20:raise ValueError('Допустимо от 1 до 20 контуров')
-    if any(not isinstance(result[k],bool) for k in ('refresh_nspd','refresh_torgi','avoid_restrictions')):raise ValueError('Параметры обновления и исключения должны быть логическими')
+    if any(not isinstance(result[k],bool) for k in ('refresh_nspd','refresh_torgi','avoid_restrictions','avoid_planned')):raise ValueError('Параметры обновления и исключения должны быть логическими')
     if not 2<=len(result['query'])<=120 or any(ord(c)<32 for c in result['query']):raise ValueError('Некорректный текст поиска торгов')
     return result
 
@@ -64,10 +64,11 @@ def metric_for(bounds):
     return f'+proj=laea +lat_0={c.y} +lon_0={c.x} +datum=WGS84 +units=m +no_defs'
 
 
-def draft_plots(s,params):
+def draft_plots(s,params,planned=()):
     """Bounded geometric hypotheses, without interpreting legal regimes."""
     metric=metric_for(s['bounds']);side=math.sqrt(params['target_area'])
     restricted=[convert(shape(f['geometry']),4326,metric) for f in s['layers'].get('restrictions',{}).get('geojson',{}).get('features',[])] if params['avoid_restrictions'] else []
+    if params.get('avoid_planned',True):restricted.extend(planned)
     chosen=[];checks=0;limited=False;unplaced=[]
     gaps=s['gaps']['features'];per_gap=max(1,math.ceil(params['limit']/max(1,len(gaps))))
     for feature in gaps:
@@ -128,7 +129,9 @@ def document_context(values,numbers):
 
 def build(values,params):
     s=values['survey'];metric=metric_for(s['bounds']);boundary=box(*s['bounds'])
-    layers=s['layers'];rows,layout=draft_plots(s,params)
+    context=values.get('nspd_context');entries=nspd_context.projected(context,s['bounds'],metric)
+    planned=[g for mode in ('schemes','planned_parcels') for g,_ in entries[mode]]
+    layers=s['layers'];rows,layout=draft_plots(s,params,planned)
     if not layers.get('parcels',{}).get('geojson',{}).get('features'):raise ValueError('Нет полученных кадастровых объектов; подбор остановлен')
     occupied=[shape(f['geometry']) for mode in ('parcels','buildings') for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]
     for row in rows:
@@ -178,6 +181,8 @@ def build(values,params):
         numbers={row.get('cadastral_number')} | {torgi.canonical(n['fields'].get('cad_num')) for n in neighbours if n['distance_m']<=10}
         numbers.discard(None)
         flags=[]
+        context_matches=nspd_context.relate(g,entries,context)
+        flags.extend(nspd_context.flags(context_matches))
         if matches['restrictions']:flags.append('Есть пересечение с полученными ЗОУИТ; нужен режим ограничения')
         if not matches['pzz']:flags.append('Территориальная зона для контура не установлена')
         if related:flags.append('Есть опубликованные процедуры; проверить статусы и схемы лотов')
@@ -187,7 +192,7 @@ def build(values,params):
         road=min(roads,key=lambda r:g.distance(r[0])) if roads else None
         candidates.append({**row,'id':digest,'area_m2':round(g.area,2),'point':[round(point.x,7),round(point.y,7)],
                            'road_proximity':{'id':road[1]['id'],'distance_m':round(g.distance(road[0]),1),'fields':public_fields(road[1]),'received_at':layers['parcels'].get('received_at'),'legal_access_confirmed':False} if road else None,
-                           'neighbours':neighbours,'matches':matches,'lots':related,'documents':document_context(values,numbers),
+                           'neighbours':neighbours,'matches':matches,'context_matches':context_matches,'lots':related,'documents':document_context(values,numbers),
                            'flags':flags,'required_checks':list(CHECKS.values()),'status':'needs_review','rights_confirmed':False,'srzu_ready':False})
     source_numbers={n for lot in lots for n in lot['cadastral_numbers']}
     sources={'nspd':{mode:{key:layer.get(key) for key in ('source','sha256','received_at')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
@@ -195,10 +200,15 @@ def build(values,params):
                       'lots':len(lots),'unlocated_numbers':sorted(n for n in source_numbers if not observations.get(n,{}).get('features')),
                       'complete':False,'documents_current':torgi_docs.same_search(source,values.get('torgi_documents'))},
              'municipal':{'id':(values.get('municipal') or {}).get('id'),'catalog_at':(values.get('municipal') or {}).get('catalog_at'),'complete':False},
-             'planning':{'id':(values.get('planning_watch') or {}).get('id'),'geometry_confirmed':False,'complete':False}}
+             'planning':{'id':(values.get('planning_watch') or {}).get('id'),'geometry_confirmed':False,'complete':False},
+             'context':nspd_context.sources(context,s['bounds'])}
+    map_layers={mode:{'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':f['geometry'],'properties':{'label':public_fields(f).get('cad_num',str(f['id']))}} for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]} for mode in ('parcels','buildings','restrictions')}
+    for mode,records in entries.items():
+        map_layers[mode]={'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':mapping(shape(f['geometry']).intersection(boundary)),
+                     'properties':{'label':str(nspd_context.fields(f).get('cad_num') or nspd_context.fields(f).get('name') or nspd_context.TITLES.get(mode,mode))}} for _,f in records if not shape(f['geometry']).intersection(boundary).is_empty]}
     return {'created_at':store.now(),'version':VERSION,'survey_id':s['id'],'source_inputs':identities(values),'bounds':s['bounds'],
             'parameters':params,'sources':sources,'candidates':candidates,'layout':layout,'warning':WARNING,
-            'map_layers':{mode:{'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':f['geometry'],'properties':{'label':public_fields(f).get('cad_num',str(f['id']))}} for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]} for mode in ('parcels','buildings','restrictions')},
+            'map_layers':map_layers,
             'summary':{'candidate_count':len(candidates),'drafts':sum(c['kind']=='draft' for c in candidates),
                        'offers':sum(c['kind']=='offer' for c in candidates),'auctions':sum(c['kind']=='auction' for c in candidates),
                        'large_gaps':sum(c['kind']=='gap' for c in candidates),'confirmed_free':0,'ready_to_submit':0,
@@ -214,11 +224,21 @@ def run(project,params):
     attempt={'state':'running','started_at':store.now(),'step':'Получение обследования','warnings':[]}
     store.set_setting('recon_attempt_'+project,attempt)
     try:
-        if settings['refresh_nspd']:survey.run(project,{**settings,'bounds':bounds})
+        if settings['refresh_nspd']:
+            survey.run(project,{**settings,'bounds':bounds})
+            attempt['step']='Проверка кварталов, схем и границ';store.set_setting('recon_attempt_'+project,attempt)
+            previous_context=store.get_setting('nspd_context_'+project)
+            context=nspd_context.collect(bounds,previous_context)
+            with store.LOCK:
+                if store.get_setting('nspd_context_'+project)!=previous_context:raise ValueError('Контекст НСПД изменился во время обновления')
+                nspd_context.save(project,context)
+            for mode,layer in context['layers'].items():
+                if layer['state']!='received':attempt['warnings'].append(nspd_context.TITLES[mode]+(': сохранено прежнее наблюдение от '+layer['received_at'] if layer['state']=='retained' else ': не получено')+'; '+layer.get('error','нет ответа'))
         else:
             previous=store.get_setting('survey_'+project)
             if not previous or previous['bounds']!=bounds:raise ValueError('Сохранённое обследование относится к другой области; включите обновление НСПД')
             survey.recalculate(project,settings)
+            if not nspd_context.applicable(store.get_setting('nspd_context_'+project),bounds):attempt['warnings'].append('Кварталы, схемы и границы этой области не сохранены; включите обновление НСПД для их получения')
         if settings['refresh_torgi']:
             attempt['step']='Обновление поиска торгов';store.set_setting('recon_attempt_'+project,attempt)
             try:torgi.run(project,{'query':settings['query'],'history':True})
@@ -294,6 +314,11 @@ def html_report(data,candidate_id=None):
         evidence=[]
         for mode,rows in c['matches'].items():
             for row in rows:evidence.append('<li>'+esc(mode)+' · '+esc(row['area_m2'])+' м² · '+esc(json.dumps(row['fields'],ensure_ascii=False))+' · '+esc(row['received_at'])+'</li>')
+        for mode,rows in c.get('context_matches',{}).items():
+            for row in rows:
+                detail=f"{row['length_m']} м линии" if row.get('length_m') is not None else f"{row['area_m2']} м² пересечения"
+                scope=' · счётчики целого квартала; положение объектов без геометрии неизвестно' if mode=='quarters' else ''
+                evidence.append('<li>'+esc(nspd_context.TITLES[mode])+' · '+esc(detail)+' · '+esc(json.dumps(row['fields'],ensure_ascii=False))+' · '+esc(row['received_at'])+esc(scope)+' · правовая применимость не подтверждена</li>')
         for lot in c['lots']:evidence.append('<li><a href="'+esc(lot['url'])+'">Лот '+esc(lot['id'])+'</a> · '+esc(lot['status'])+' · поиск '+esc(lot['search_date'])+' · действующая процедура по наблюдению: '+esc(lot['active_observed'])+' · геометрия: '+esc(json.dumps(lot['geometry_sources'],ensure_ascii=False))+'</li>')
         for doc in c['documents']:evidence.append('<li><a href="'+esc(doc['url'])+'">'+esc(doc['title'])+'</a> · '+esc(doc['scope'])+' · '+esc(doc.get('received_at'))+'</li>')
         blocks.append('<section><h2>'+esc(names[c['kind']])+' '+esc(c['id'])+'</h2><p>Площадь '+esc(c['area_m2'])+' м²; точка внутри: '+esc(c['point'])+'. Права не подтверждены; к подаче не готов.</p>'
@@ -303,4 +328,5 @@ def html_report(data,candidate_id=None):
                       +'<h3>Недостающие проверки</h3><ul>'+''.join('<li>'+esc(x)+'</li>' for x in c['required_checks'])+'</ul><h3>Контур WGS84</h3><pre>'+esc(json.dumps(c['geometry'],ensure_ascii=False))+'</pre></section>')
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}@media print{section{break-before:page}}</style>'
             +'<h1>Поиск участков: рабочее досье</h1><p>'+esc(WARNING)+'</p><p>'+('Предыдущая версия: источники изменились.' if data.get('stale') else 'Датированная версия расчёта.')+'</p><p>Расчёт '+esc(result.get('created_at'))+'; цель '+esc(PURPOSES.get(result.get('parameters',{}).get('purpose'),'Не выбрана'))+'.</p>'
-            +'<p>Подтверждённых свободных участков: 0. Досье не является СРЗУ или заявлением.</p>'+''.join(blocks)+'<h2>Источники и даты</h2><pre>'+esc(json.dumps(result.get('sources',{}),ensure_ascii=False,indent=2))+'</pre></html>').encode('utf-8')
+            +'<p>Подтверждённых свободных участков: 0. Досье не является СРЗУ или заявлением.</p>'
+            +''.join('<p>'+esc(w)+'</p>' for w in result.get('operation_warnings',[]))+''.join(blocks)+'<h2>Источники и даты</h2><pre>'+esc(json.dumps(result.get('sources',{}),ensure_ascii=False,indent=2))+'</pre></html>').encode('utf-8')

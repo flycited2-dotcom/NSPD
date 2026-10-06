@@ -74,7 +74,7 @@ def request_json(url, body=None):
     return data, hashlib.sha256(raw).hexdigest()
 
 
-def normalize(data):
+def normalize(data, geometry_types=('Polygon', 'MultiPolygon'), extra_fields=()):
     fc = data.get('data', data)
     if not isinstance(fc, dict) or fc.get('type') != 'FeatureCollection' or not isinstance(fc.get('features'), list):
         raise ValueError('Неожиданный формат ответа НСПД')
@@ -90,8 +90,8 @@ def normalize(data):
         if crs not in ('EPSG:3857', 'EPSG:4326'):
             raise ValueError('Система координат ответа не подтверждена')
         geom = shape(g)
-        if geom.is_empty or not geom.is_valid or geom.geom_type not in ('Polygon', 'MultiPolygon'):
-            raise ValueError('Получена некорректная полигональная геометрия')
+        if geom.is_empty or not geom.is_valid or geom.geom_type not in geometry_types:
+            raise ValueError('Получена некорректная геометрия для выбранного слоя')
         if crs == 'EPSG:3857':
             geom = transform(Transformer.from_crs(3857, 4326, always_xy=True).transform, geom)
         if not all(math.isfinite(x) for x in geom.bounds) or not box(-180, -90, 180, 90).covers(geom):
@@ -105,7 +105,7 @@ def normalize(data):
         props = {k: p[k] for k in ('category', 'categoryName', 'label', 'externalKey', 'descr') if k in p}
         props['options'] = {k: options[k] for k in ('cad_num', 'specified_area', 'land_record_area', 'ownership_type',
             'right_type', 'permitted_use_established_by_document', 'land_record_category_type', 'readable_address', 'status',
-            'legal_act_document_date', 'legal_act_document_issuer', 'legal_act_document_name', 'legal_act_document_number', 'name_by_doc', 'type_boundary_value', 'building_name', 'purpose', 'build_record_area', 'content_restrict_encumbrances', 'name', 'type_zone', 'reg_numb_border', 'zone_type') if k in options}
+            'legal_act_document_date', 'legal_act_document_issuer', 'legal_act_document_name', 'legal_act_document_number', 'name_by_doc', 'type_boundary_value', 'building_name', 'purpose', 'build_record_area', 'content_restrict_encumbrances', 'name', 'type_zone', 'reg_numb_border', 'zone_type') + tuple(extra_fields) if k in options}
         result.append({'type': 'Feature', 'id': key, 'geometry': mapping(geom), 'properties': props})
     return {'type': 'FeatureCollection', 'features': result}
 
