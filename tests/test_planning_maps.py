@@ -124,7 +124,7 @@ def test_run_preserves_other_work_and_stale_source_hides_preview(workspace,monke
     assert not store.candidates('trudovoe') and not pm.report('trudovoe')['stale']
     assert pm.preview('trudovoe','doc',1).startswith(b'\x89PNG')
     with pytest.raises(ValueError,match='Страница'):pm.preview('trudovoe','doc',2)
-    changed=copy.deepcopy(saved_survey);changed['id']='s2';store.set_setting('survey_trudovoe',changed)
+    changed=copy.deepcopy(saved_survey);changed['id']='s2';changed['layers']['parcels']['received_at']='new-date';store.set_setting('survey_trudovoe',changed)
     assert pm.report('trudovoe')['stale']
     with pytest.raises(ValueError,match='прежним'):pm.preview('trudovoe','doc',1)
     assert b'<img' not in pm.html_report('trudovoe')
@@ -196,3 +196,112 @@ def test_actual_isolated_worker_reads_pdf(workspace):
         rendered=pm.worker('render',sha,1)
         assert max(rendered['width'],rendered['height'])==2400
         assert pm.checked_image(sha,1,rendered).startswith(b'\x89PNG')
+
+
+def many_maps(workspace,monkeypatch):
+    sha=source(workspace);catalog=store.get_setting('planning_watch_trudovoe')
+    original=catalog['items'][0];catalog['items']=[dict(original,id='doc'+str(n),total_pages=12) for n in range(3)]
+    store.set_setting('planning_watch_trudovoe',catalog)
+    def inspect(sha):
+        result=index(sha);result.update(total_pages=12,processed_pages=12)
+        result['map_pages']=[dict(result['map_pages'][0],page=n) for n in range(1,13)]
+        return result
+    monkeypatch.setattr(pm,'inspect_pdf',inspect);monkeypatch.setattr(pm,'render_page',png)
+    return sha
+
+
+def test_more_than_24_total_maps_are_indexed_with_only_three_new_images(workspace,monkeypatch):
+    many_maps(workspace,monkeypatch)
+    summary=pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    report=pm.report('trudovoe')
+    assert summary['map_pages']==36 and summary['errors']==0 and summary['image_errors']==0
+    assert report['image_summary']=={'total':36,'rendered':3,'remaining':33,'errors':0}
+    assert not report['stale'] and not report['result']['geometry_confirmed'] and not report['result']['legal_status_confirmed']
+    assert all(d['received_at']=='original-date' for d in report['result']['documents'])
+
+
+def test_render_continues_three_pages_and_preserves_images_sources_and_index_dates(workspace,monkeypatch):
+    many_maps(workspace,monkeypatch);pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    before=copy.deepcopy(pm.report('trudovoe')['result'])
+    summary=pm.render('trudovoe',{'id':before['id']});after=pm.report('trudovoe')['result']
+    assert summary=={'processed':3,'remaining':30,'network_requests':0}
+    assert after['previous_result_id']==before['id'] and after['created_at']==before['created_at']
+    assert after['documents'][0]['map_pages'][:3]==before['documents'][0]['map_pages'][:3]
+    assert all(a['received_at']==b['received_at'] and a['sha256']==b['sha256'] for a,b in zip(before['documents'],after['documents']))
+    assert pm.preview('trudovoe','doc0',4).startswith(b'\x89PNG')
+    with pytest.raises(ValueError,match='изменились'):pm.render('trudovoe',{'id':before['id']})
+
+
+def test_render_failures_remain_visible_without_automatic_retry(workspace,monkeypatch):
+    source(workspace);monkeypatch.setattr(pm,'inspect_pdf',lambda sha:index(sha))
+    calls=[]
+    def fail(*a):calls.append(a);raise ValueError('Poppler unavailable')
+    monkeypatch.setattr(pm,'render_page',fail)
+    pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    before=pm.report('trudovoe')
+    assert before['image_summary']=={'total':1,'rendered':0,'remaining':0,'errors':1}
+    assert pm.render('trudovoe',{'id':before['result']['id']})['processed']==0 and len(calls)==1
+    assert pm.render('trudovoe',{'id':before['result']['id'],'retry':True})['processed']==1 and len(calls)==2
+
+
+def test_new_source_during_render_cannot_overwrite_result(workspace,monkeypatch):
+    many_maps(workspace,monkeypatch);pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    before=store.get_setting('planning_maps_trudovoe')
+    def change(sha,page):
+        store.set_setting('planning_watch_trudovoe',{'id':'changed','items':[]})
+        return png(sha,page)
+    monkeypatch.setattr(pm,'render_page',change)
+    with pytest.raises(ValueError,match='во время отрисовки'):pm.render('trudovoe',{'id':before['id']})
+    assert store.get_setting('planning_maps_trudovoe')==before
+
+
+def test_concurrent_index_result_is_not_replaced(workspace,monkeypatch):
+    sha=source(workspace)
+    def inspect(sha):
+        store.set_setting('planning_maps_trudovoe',{'id':'other','planning_id':'p1','survey_id':'s1'})
+        return index(sha)
+    monkeypatch.setattr(pm,'inspect_pdf',inspect);monkeypatch.setattr(pm,'render_page',png)
+    with pytest.raises(ValueError,match='Другая версия'):pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    assert store.get_setting('planning_maps_trudovoe')['id']=='other'
+
+
+def test_matched_page_is_rendered_before_unmatched_pages():
+    data={'documents':[{'id':'a','act_identity':{'date':'2026-01-01'},'map_pages':[
+        {'page':1,'parcel_number_matches':[]},
+        {'page':2,'parcel_number_matches':[{'parcel_intersects_survey':True}]},
+        {'page':3,'parcel_number_matches':[{'parcel_intersects_survey':False}]}]}]}
+    assert [page['page'] for _,page in pm.render_queue(data)]==[2,3,1]
+
+
+def test_previous_index_algorithm_is_stale_even_with_same_sources(workspace):
+    source(workspace)
+    store.set_setting('planning_maps_trudovoe',{'id':'old','algorithm':pm.ALGORITHM,'planning_id':'p1','survey_id':'s1','documents':[]})
+    assert pm.report('trudovoe')['stale']
+    with pytest.raises(ValueError,match='изменились'):pm.render('trudovoe',{'id':'old'})
+
+
+def test_recalculated_gaps_keep_maps_current_but_changed_observations_invalidate(workspace,monkeypatch):
+    sha=source(workspace);monkeypatch.setattr(pm,'inspect_pdf',lambda sha:index(sha));monkeypatch.setattr(pm,'render_page',png)
+    pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    observation=store.get_setting('survey_trudovoe');changed=copy.deepcopy(observation)
+    changed.update(id='gap-recalculation',gaps={'new-filter-result':True},created_at='new-calculation-date')
+    store.set_setting('survey_trudovoe',changed)
+    assert not pm.report('trudovoe')['stale'] and pm.preview('trudovoe','doc',1).startswith(b'\x89PNG')
+    for key,value in [('bounds',[0,0,2,2]),('layers',{})]:
+        store.set_setting('survey_trudovoe',dict(changed,**{key:value}))
+        assert pm.report('trudovoe')['stale']
+    changed['layers']['parcels']['sha256']='new-observation-hash'
+    store.set_setting('survey_trudovoe',changed)
+    assert pm.report('trudovoe')['stale']
+
+
+def test_reindex_does_not_retry_failed_images_of_the_same_pdf(workspace,monkeypatch):
+    source(workspace);monkeypatch.setattr(pm,'inspect_pdf',lambda sha:index(sha))
+    calls=[]
+    def fail(*args):calls.append(args);raise ValueError('Renderer failed')
+    monkeypatch.setattr(pm,'render_page',fail)
+    pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    before=pm.report('trudovoe')['result']['documents'][0]['map_pages'][0]
+    pm.run('trudovoe',{'planning_id':'p1','survey_id':'s1'})
+    after=pm.report('trudovoe')['result']['documents'][0]['map_pages'][0]
+    assert len(calls)==1 and after['image_error']==before['image_error'] and after['image_attempt']==before['image_attempt']

@@ -41,7 +41,7 @@ async function runRecon(){
  el('recon-status').textContent='Выполняется обследование и подбор контуров…';
  try{const job=await api('/api/recon',{bounds:boundsInput(),min_area:Number(el('survey-min').value),max_area:Number(el('survey-max').value),min_width:Number(el('survey-width').value),purpose:el('recon-purpose').value,target_area:Number(el('recon-area-size').value),limit:Number(el('recon-limit').value),refresh_nspd:el('recon-update-nspd').checked,refresh_torgi:el('recon-update-torgi').checked,avoid_restrictions:el('recon-avoid-zones').checked,avoid_planned:el('recon-avoid-planned').checked,avoid_environment:el('recon-avoid-environment').checked,query:el('torgi-query').value});let state;
  do{await new Promise(r=>setTimeout(r,1000));state=await api('/api/jobs/'+job.job_id);await refreshRecon()}while(state.state==='running');
- await refreshSurvey();await refreshRecon();if(state.state==='error')throw Error(state.error);
+ await refreshSurvey();await refreshRecon();if(typeof refreshPzzMaps==='function')await refreshPzzMaps();if(state.state==='error')throw Error(state.error);
  }catch(e){el('recon-status').textContent+='\nНе выполнено: '+e.message}
  finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
 }
@@ -71,7 +71,7 @@ async function runBoundary(){
  do{await new Promise(r=>setTimeout(r,1000));state=await api('/api/jobs/'+job.job_id);await refreshBoundary()}while(state.state==='running');
  await refreshRecon();if(state.state==='error')throw Error(state.error);
  }catch(e){el('boundary-status').textContent+=' Не выполнено: '+e.message}
- finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);if(typeof pzzCanRender==='function')el('pzz-maps-render').disabled=!pzzCanRender();if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
 }
 el('boundary-run').addEventListener('click',runBoundary);
 refreshBoundary().catch(e=>el('boundary-status').textContent=e.message);

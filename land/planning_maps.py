@@ -11,9 +11,12 @@ from shapely.geometry import box, shape
 from . import store, planning_watch, torgi
 
 ALGORITHM = 'pzz-map-pairs-v2'
+RESULT_ALGORITHM = 'pzz-map-catalog-v3'
 RENDER_ALGORITHM = 'pzz-map-poppler-2400-v1'
 MAX_DOCUMENTS, MAX_BYTES = 16, 32 * 1024 * 1024
 MAX_MAP_PAGES = 24
+MAX_TOTAL_MAP_PAGES = MAX_DOCUMENTS * MAX_MAP_PAGES
+RENDER_BATCH = 3
 ROOT = Path(__file__).resolve().parent.parent
 MAP_HEADING = re.compile(r'фрагмент\s+карты\s+градостроительного\s*зонирования', re.I)
 ZONE = re.compile(r'(?<![А-Яа-яЁё0-9])(?:ОД|СХ|ИТ|Ж|О|П|Р|С|Т)\d+(?:\.\d+){0,2}(?![А-Яа-яЁё0-9])')
@@ -181,6 +184,40 @@ def relate(result, survey):
     return result
 
 
+def survey_signature(survey):
+    """Map lookup depends on the observed area/layers, not the gap calculation ID."""
+    return planning_watch.digest({'bounds':survey.get('bounds'),'layers':survey.get('layers')}) if survey else None
+
+
+def render_queue(result, retry=False):
+    queue=[(d,p) for d in result.get('documents',[]) for p in d.get('map_pages',[])
+           if not p.get('image') and (retry or not p.get('image_error'))]
+    # Prioritize actual observed parcel matches; this never assigns a zone.
+    return sorted(queue,key=lambda row:(not any(m.get('parcel_intersects_survey') for m in row[1].get('parcel_number_matches',[])),
+        not bool(row[1].get('parcel_number_matches')), -(int((row[0].get('act_identity') or {}).get('date','0000-00-00').replace('-',''))), row[0]['id'],row[1]['page']))
+
+
+def render_batch(result, retry=False):
+    selected=render_queue(result,retry)[:RENDER_BATCH]
+    for doc,page in selected:
+        attempt={'checked_at':store.now(),'algorithm':RENDER_ALGORITHM,'state':'error'}
+        try:
+            page['image']=render_page(doc['sha256'],page['page'])
+            page.pop('image_error',None)
+            attempt['state']='rendered'
+        except Exception as exc:
+            page['image_error']=str(exc)[:500];attempt['error']=page['image_error']
+        page['image_attempt']=attempt
+    return len(selected)
+
+
+def save(project,result):
+    result['id']=planning_watch.digest(result)[:20]
+    folder=store.DATA/'planning_maps';folder.mkdir(exist_ok=True)
+    (folder/(result['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+    store.set_setting('planning_maps_'+project,result)
+
+
 def run(project, params):
     catalog = store.get_setting('planning_watch_' + project)
     survey = store.get_setting('survey_' + project)
@@ -188,10 +225,13 @@ def run(project, params):
         raise ValueError('Документы или область изменились; обновите страницу')
     rows = selected(catalog)
     if not rows:
-        raise ValueError('Нет прочитанных PDF из раздела ПЗЗ за 2026 год')
+        raise ValueError('Нет прочитанных PDF ПЗЗ из наблюдаемых перечней')
+    old=store.get_setting('planning_maps_'+project)
+    old_pages={(d.get('sha256'),p['page']):p for d in (old or {}).get('documents',[]) for p in d.get('map_pages',[])}
     result = {'planning_id': catalog['id'], 'survey_id': (survey or {}).get('id'), 'created_at': store.now(), 'documents': [],
-              'algorithm': ALGORITHM, 'geometry_confirmed': False, 'legal_status_confirmed': False, 'network_requests': 0, 'warning': WARNING}
-    result['previous_result_id'] = (store.get_setting('planning_maps_' + project) or {}).get('id')
+              'survey_source_signature':survey_signature(survey),
+              'algorithm': RESULT_ALGORITHM, 'geometry_confirmed': False, 'legal_status_confirmed': False, 'network_requests': 0, 'warning': WARNING}
+    result['previous_result_id'] = (old or {}).get('id')
     attempt = {'state': 'running', 'started_at': store.now(), 'requested': len(rows), 'processed': 0, 'network_requests': 0}
     store.set_setting('planning_maps_attempt_' + project, attempt)
     try:
@@ -202,13 +242,16 @@ def run(project, params):
                 if details['total_pages'] != row['total_pages']:
                     raise ValueError('Число страниц PDF изменилось')
                 entry.update(details, state='indexed')
-                if sum(len(x['map_pages']) for x in result['documents']) + len(entry['map_pages']) > MAX_MAP_PAGES:
-                    raise ValueError('Общее число карт превышает предел 24 листа')
+                if sum(len(x['map_pages']) for x in result['documents']) + len(entry['map_pages']) > MAX_TOTAL_MAP_PAGES:
+                    raise ValueError('Общее число карт превышает предел каталога')
                 for page in entry['map_pages']:
-                    try:
-                        page['image'] = render_page(row['sha256'], page['page'])
-                    except Exception as exc:
-                        page['image_error'] = str(exc)[:500]
+                    if image_path(row['sha256'],page['page']).with_suffix('.json').exists():
+                        try:page['image']=render_page(row['sha256'],page['page'])
+                        except Exception as exc:page['image_error']=str(exc)[:500]
+                    elif old_pages.get((row['sha256'],page['page']),{}).get('image_error'):
+                        previous=old_pages[(row['sha256'],page['page'])]
+                        page['image_error']=previous['image_error']
+                        if previous.get('image_attempt'):page['image_attempt']=copy.deepcopy(previous['image_attempt'])
             except Exception as exc:
                 entry.update(state='error', error=str(exc)[:500], map_pages=[])
             result['documents'].append(entry)
@@ -217,16 +260,15 @@ def run(project, params):
         result = relate(result, survey)
         if not any(d['state'] == 'indexed' for d in result['documents']):
             raise ValueError('Ни один PDF не проверен; прежний результат карт сохранён')
+        render_batch(result)
         with store.LOCK:
             current = store.get_setting('planning_watch_' + project) or {}
             current_survey = store.get_setting('survey_' + project) or {}
             if current.get('id') != catalog['id'] or current_survey.get('id') != (survey or {}).get('id'):
                 raise ValueError('Документы или область изменились во время анализа; прежний результат сохранён')
-            result['id'] = planning_watch.digest(result)[:20]
-            store.set_setting('planning_maps_' + project, result)
-            folder = store.DATA / 'planning_maps'
-            folder.mkdir(exist_ok=True)
-            (folder / (result['id'] + '.json')).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+            if (store.get_setting('planning_maps_'+project) or {}).get('id')!=(old or {}).get('id'):
+                raise ValueError('Другая версия карт уже записана; прежний результат сохранён')
+            save(project,result)
             with store.connect() as db:
                 store.event(db, project, 'planning_maps', {'id': result['id'], 'documents': len(rows), 'network_requests': 0})
         attempt.update(state='done', finished_at=store.now())
@@ -240,14 +282,34 @@ def run(project, params):
         store.set_setting('planning_maps_attempt_' + project, attempt)
 
 
+def render(project,params):
+    data=report(project);old=data['result'];retry=params.get('retry',False)
+    if not isinstance(retry,bool):raise ValueError('Некорректный параметр повтора изображений')
+    if not old or data['stale'] or params.get('id')!=old['id']:
+        raise ValueError('Карты, документы или область изменились; повторите локальный анализ')
+    result=copy.deepcopy(old)
+    processed=render_batch(result,retry)
+    if not processed:return {'processed':0,'remaining':0,'network_requests':0}
+    result['previous_result_id']=old['id'];result.pop('id',None);result['images_updated_at']=store.now()
+    with store.LOCK:
+        if (store.get_setting('planning_maps_'+project) or {}).get('id')!=old['id'] or report(project)['stale']:
+            raise ValueError('Карты, документы или область изменились во время отрисовки; прежний результат сохранён')
+        save(project,result)
+        with store.connect() as db:store.event(db,project,'planning_maps_render',{'id':result['id'],'processed':processed,'network_requests':0})
+    return {'processed':processed,'remaining':len(render_queue(result)),'network_requests':0}
+
+
 def report(project):
     result = store.get_setting('planning_maps_' + project)
     catalog = store.get_setting('planning_watch_' + project) or {}
     survey = store.get_setting('survey_' + project) or {}
     attempt = store.get_setting('planning_maps_attempt_' + project)
-    stale = bool(result and (result['planning_id'] != catalog.get('id') or result['survey_id'] != survey.get('id')))
+    stale = bool(result and (result.get('algorithm')!=RESULT_ALGORITHM or result['planning_id'] != catalog.get('id')
+                 or 'survey_source_signature' not in result or result['survey_source_signature']!=survey_signature(survey)))
+    pages=[p for d in (result or {}).get('documents',[]) for p in d.get('map_pages',[])]
     return {'result': result, 'stale': stale, 'current_planning_id': catalog.get('id'), 'current_survey_id': survey.get('id'),
-            'attempt': attempt, 'warning': WARNING}
+            'attempt': attempt, 'warning': WARNING,'image_summary':{'total':len(pages),'rendered':sum(bool(p.get('image')) for p in pages),
+                'remaining':len(render_queue(result or {})),'errors':sum(bool(p.get('image_error')) for p in pages)}}
 
 
 def preview(project, document, page):
@@ -284,9 +346,9 @@ def html_report(project):
                                + esc(match['received_at']) + '. Площадь участка пересекает область: ' + ('да' if match['parcel_intersects_survey'] else 'нет')
                                + '. Эта геометрия относится к участку ЕГРН; граница зоны не установлена.</p>')
             if page.get('image') and not data['stale']:
-                content.append('<a href="' + esc(url) + '"><img alt="Полный картографический лист, страница ' + esc(page['page']) + '" src="' + esc(url) + '"></a>')
+                content.append('<a href="' + esc(url) + '"><img loading="lazy" alt="Полный картографический лист, страница ' + esc(page['page']) + '" src="' + esc(url) + '"></a>')
             else:
-                content.append('<p>' + esc(page.get('image_error') or 'Предыдущая версия карты скрыта; повторите локальный анализ.') + '</p>')
+                content.append('<p>' + esc(page.get('image_error') or ('Предыдущая версия карты скрыта; повторите локальный анализ.' if data['stale'] else 'Изображение в очереди локальной отрисовки.')) + '</p>')
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Карты изменений ПЗЗ</title><style>body{font:16px/1.5 sans-serif;max-width:1100px;margin:30px auto;padding:0 20px;color:#253125}img{width:100%;height:auto}h2{margin-top:40px;border-top:1px solid #bbc6b7;padding-top:20px}a,p{overflow-wrap:anywhere}</style>'
             '<h1>Карты изменений ПЗЗ</h1><p>' + esc(WARNING) + '</p><p>' + ('Предыдущий результат: документы или область изменились.' if data['stale'] else 'Локальный анализ сохранённых PDF.')
             + '</p>' + ''.join(content) + '</html>').encode('utf-8')

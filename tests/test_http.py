@@ -144,8 +144,9 @@ def test_pzz_maps_endpoints_guard_and_stale_state(server):
     assert data['stale'] and data['attempt']['state']=='interrupted'
     with request(server,'/api/planning/maps/report') as r:
         assert 'text/html' in r.headers['Content-Type']
-    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/planning/maps',{},token=False)
-    assert error.value.code==403
+    for path in ('/api/planning/maps','/api/planning/maps/render'):
+        with pytest.raises(urllib.error.HTTPError) as error:request(server,path,{},token=False)
+        assert error.value.code==403
     with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/planning/maps/page?document=doc&page=1')
     assert error.value.code==400
 
