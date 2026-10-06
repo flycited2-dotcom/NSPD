@@ -122,6 +122,45 @@ def test_fresh_search_invalidates_cards_even_when_created_at_is_equal(db,monkeyp
     assert len(calls)==4 and current['search_source_id']=='fresh-source'
 
 
+def test_fresh_cards_reuse_dated_files_across_separate_batches(db,monkeypatch):
+    monkeypatch.setattr(docs,'BATCH',1)
+    def fetch(url,**kw):
+        number=int(url.rsplit('_',1)[-1])
+        return json.dumps(card(number,noticeAttachments=[attachment(fileId=('a' if number==1 else 'c')*24)])).encode(),'application/json',200
+    monkeypatch.setattr(docs,'fetch',fetch)
+    for _ in range(2):docs.metadata('trudovoe',{'search_id':'search'})
+    old=store.get_setting('torgi_documents_trudovoe')
+    for file in old['files'].values():
+        file.update(state='read',received_at='file-source-date',sha256='d'*64,processed_at='old-reading-date',
+                    visual={'pages':[{'processed_at':'old-ocr-date'}]})
+    store.set_setting('torgi_documents_trudovoe',old)
+    search=store.get_setting('torgi_trudovoe');search.update(id='fresh',search_source_id='fresh-source')
+    store.set_setting('torgi_trudovoe',search)
+    assert docs.metadata('trudovoe',{'search_id':'fresh'})['remaining']==1
+    partial=store.get_setting('torgi_documents_trudovoe')
+    assert len(partial['files'])==len(partial['retained_files'])==1
+    assert not docs.file_queue(partial)
+    assert docs.metadata('trudovoe',{'search_id':'fresh'})['remaining']==0
+    current=store.get_setting('torgi_documents_trudovoe')
+    assert current['files']==old['files'] and current['retained_files']=={}
+
+
+def test_changed_attachment_version_stays_pending_and_retired_file_is_not_active(db,monkeypatch):
+    monkeypatch.setattr(docs,'fetch',lambda url,**kw:(json.dumps(card(int(url.rsplit('_',1)[-1]))).encode(),'application/json',200))
+    docs.metadata('trudovoe',{'search_id':'search'})
+    old=store.get_setting('torgi_documents_trudovoe')
+    for file in old['files'].values():file.update(state='read',received_at='old-source-date')
+    store.set_setting('torgi_documents_trudovoe',old)
+    search=store.get_setting('torgi_trudovoe');search.update(id='fresh',search_source_id='fresh-source');store.set_setting('torgi_trudovoe',search)
+    monkeypatch.setattr(docs,'fetch',lambda url,**kw:(json.dumps(card(int(url.rsplit('_',1)[-1]),noticeAttachments=[attachment(hash='c'*64)])).encode(),'application/json',200))
+    docs.metadata('trudovoe',{'search_id':'fresh'})
+    current=store.get_setting('torgi_documents_trudovoe')
+    assert len(current['retained_files'])==len(current['files'])==1
+    assert len(docs.file_queue(current))==1 and next(iter(current['files'].values()))['state']=='pending'
+    assert 'received_at' not in next(iter(current['files'].values()))
+    assert current['retained_files']==old['files']
+
+
 @pytest.mark.parametrize('operation',[docs.read,docs.reprocess])
 def test_local_search_revision_retains_documents_but_new_source_blocks_processing(db,monkeypatch,operation):
     catalog={'id':'docs','search_id':'search','cards':[],'files':{}}

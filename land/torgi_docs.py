@@ -110,6 +110,12 @@ def metadata_queue(search,result,retry=False):
     return [lot for lot in search['lots'] if lot['id'] not in prior or (retry and prior[lot['id']]['state']=='error')]
 
 
+def refresh_files(result,prior):
+    result['files']=files_for(result['cards'],prior)
+    # Dated files of cards not yet refreshed remain reusable, outside active queues.
+    result['retained_files']={key:copy.deepcopy(file) for key,file in prior.items() if key not in result['files']}
+
+
 def file_queue(result,retry=False):
     def priority(f):
         name=f['file_name'].lower()
@@ -184,6 +190,7 @@ def metadata(project,params):
     retry=params.get('retry_errors',False)
     if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
     old=store.get_setting('torgi_documents_'+project,{}) or {}
+    prior_files={**old.get('retained_files',{}),**old.get('files',{})}
     result=copy.deepcopy(old)
     # A new actual search requires fresh cards; geometry-only updates retain dated cards.
     same=same_search(search,result)
@@ -210,10 +217,10 @@ def metadata(project,params):
                 card={'lot_id':lot['id'],'state':'error','error':str(exc)[:500],'checked_at':store.now(),'source':url,'sha256':digest}
             # Only normalized fields are persisted; raw account/payment/owner fields are excluded.
             result['cards']=[c for c in result['cards'] if c['lot_id']!=lot['id']]+[card]
-            result['files']=files_for(result['cards'],old.get('files',{}))
+            refresh_files(result,prior_files)
             attempt['processed']+=1;persist(project,result)
             store.set_setting('torgi_documents_attempt_'+project,attempt);time.sleep(2)
-        result['files']=files_for(result['cards'],old.get('files',{}))
+        refresh_files(result,prior_files)
         persist(project,result)
         if attempt['state']=='running':attempt['state']='done'
         attempt.update(finished_at=store.now(),remaining=len(metadata_queue(search,result)))
