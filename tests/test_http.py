@@ -41,6 +41,30 @@ def test_municipal_local_export_and_protected_endpoint(server):
     assert error.value.code==403
 
 
+def test_district_report_and_protected_operations(server, monkeypatch):
+    from land import planning_watch
+    with request(server,'/api/planning/export') as r:
+        assert 'district-document-versions.json' in r.headers['Content-Disposition']
+        assert json.load(r)['result'] is None
+    with request(server,'/api/planning/report') as r:
+        assert 'text/html' in r.headers['Content-Type']
+        assert 'Документы района'.encode() in r.read()
+    for path in ('/api/planning/catalog','/api/planning/read'):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            request(server,path,{},token=False)
+        assert error.value.code==403
+    monkeypatch.setattr(planning_watch,'catalog',lambda project:{'documents':2})
+    with request(server,'/api/planning/catalog',{'project':'trudovoe'}) as r:
+        job_id=json.load(r)['job_id']
+    import time
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as r:
+            job=json.load(r)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done' and job['result']=={'documents':2}
+
+
 def test_municipal_large_export_and_protected_endpoint(server):
     store.set_setting('municipal_trudovoe',{'id':'m1','items':[]})
     store.set_setting('municipal_large_attempt_trudovoe',{'state':'running'})

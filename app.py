@@ -21,6 +21,7 @@ from land.exports import bundle, dossier
 from land import nspd
 from land import survey
 from land import publications
+from land import planning_watch
 from land import torgi
 from land import municipal
 from land import municipal_local
@@ -202,6 +203,10 @@ class Handler(BaseHTTPRequestHandler):
             if p.path in ('/api/publications', '/api/publications/export'):
                 result = store.get_setting('publications_' + project, None)
                 return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/planning', '/api/planning/export'):
+                return self.send(planning_watch.report(project), filename='district-document-versions.json' if p.path.endswith('/export') else None)
+            if p.path == '/api/planning/report':
+                return self.send(planning_watch.html_report(project), content_type='text/html; charset=utf-8')
             if p.path in ('/api/torgi', '/api/torgi/export'):
                 result = store.get_setting('torgi_' + project, None)
                 attempt = store.get_setting('torgi_attempt_' + project, None)
@@ -326,6 +331,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Локальное OCR изображений и PDF торгов', lambda: torgi_visual.run(project, data)))
             if path == '/api/publications':
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
+            if path == '/api/planning/catalog':
+                return self.send(launch_job(project, 'Перечни документов района и ПЗЗ', lambda: planning_watch.catalog(project)))
+            if path == '/api/planning/read':
+                return self.send(launch_job(project, 'Версии и реквизиты PDF района', lambda: planning_watch.read(project, data)))
             if path == '/api/torgi':
                 return self.send(launch_job(project, 'Поиск лотов ГИС Торги', lambda: torgi.run(project, data)))
             if path == '/api/torgi/geometry':
