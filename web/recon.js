@@ -30,6 +30,7 @@ async function refreshRecon(){
   reconDraw.clearLayers();
   for(const mode of ['parcels','buildings','restrictions'])L.geoJSON(r.map_layers[mode],{style:{color:mode==='restrictions'?'#bd4d4d':mode==='parcels'?'#87918a':'#624332',weight:1,fillOpacity:mode==='restrictions'?.04:.15,dashArray:mode==='restrictions'?'5 4':null},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   for(const mode of ['settlements','quarters','schemes','planned_parcels','red_lines','water','forests','protected','heritage'])if(r.map_layers[mode])L.geoJSON(r.map_layers[mode],{style:{color:mode==='red_lines'?'#cf3544':mode==='quarters'?'#8067aa':mode==='water'?'#4489a5':['forests','protected'].includes(mode)?'#567741':mode==='settlements'?'#4489a5':'#b05e35',weight:mode==='red_lines'?2:1,fillOpacity:.02,dashArray:'5 6'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
+  if(el('boundary-show').checked&&r.map_layers.historical_boundary)L.geoJSON(r.map_layers.historical_boundary,{style:{color:'#9a5a32',weight:3,fill:false,dashArray:'9 7'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   for(const c of r.candidates)L.geoJSON({type:'Feature',geometry:c.geometry,properties:{}},{style:{color:c.kind==='auction'?'#893f91':c.kind==='offer'?'#318ab5':'#bc841e',weight:2,fillOpacity:.25},onEachFeature:(f,l)=>l.bindPopup(`${escapeHtml(reconNames[c.kind])} · ${areaFmt(c.area_m2)} м²<br>Правовой статус не подтверждён`)}).addTo(reconDraw);
   const [w,south,e,n]=r.bounds;reconMap.fitBounds([[south,w],[n,e]],{padding:[16,16]});
  }
@@ -48,6 +49,7 @@ el('recon-select').addEventListener('click',()=>startSelection(reconMap,el('reco
 reconMap.on('click',selectCorner);
 el('recon-run').addEventListener('click',runRecon);
 el('recon-kind').addEventListener('change',refreshRecon);
+el('boundary-show').addEventListener('change',refreshRecon);
 el('recon-osm').addEventListener('change',()=>{if(el('recon-osm').checked){if(!reconTiles)reconTiles=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(reconMap)}else if(reconTiles){reconMap.removeLayer(reconTiles);reconTiles=null}});
 for(const container of ['recon-results','recon-watch'])el(container).addEventListener('click',async e=>{
  const show=e.target.closest('[data-recon-show]');if(show){const c=show.dataset.reconWatchShow?reconWatch.find(r=>r.candidate.id===show.dataset.reconShow)?.candidate:reconResult?.candidates.find(c=>c.id===show.dataset.reconShow);if(c){const layer=L.geoJSON({type:'Feature',geometry:c.geometry,properties:{}},{style:{color:'#bc841e',weight:4,fillOpacity:.2}}).addTo(reconDraw);reconMap.fitBounds(layer.getBounds(),{padding:[25,25]})}return;}
@@ -55,3 +57,22 @@ for(const container of ['recon-results','recon-watch'])el(container).addEventLis
  try{await api('/api/recon/watch',{result_id:reconResult.id,id:save.dataset.reconSave});await refreshRecon()}catch(error){el('recon-status').textContent=error.message}finally{save.disabled=reconStale||!sameReconBounds()}
 });
 refreshRecon().catch(e=>el('recon-status').textContent=e.message);
+let boundaryResult=null;
+async function refreshBoundary(){
+ const d=await api('/api/planning/boundary');boundaryResult=d.result;
+ const a=d.attempt;
+ let text=a?`Проверка документов: ${({running:'выполняется',done:'завершена',error:'ошибка',interrupted:'прервана'})[a.state]||a.state} · ${a.step||''}${a.error?' · '+a.error:''}. `:'';
+ if(d.result){const r=d.result;text+=`Документ границы 17.02.2021 получен ${reconDate(r.source.received_at)}. В перечнях найдено ${r.history.items.length} ссылок Трудовского поселения; ${r.history.all_observed_pages_received?'все выбранные страницы перечней получены':'часть страниц не обновлена, прежние наблюдения датированы'}. Предполагаемое положение границы и её актуальность требуют подтверждения. Включите её показ для сравнения; обновлённый источник применяется при следующем расчёте. Полнота истории и действующая редакция ПЗЗ не подтверждены.`;}
+ else text+='Действующая граница требует проверки. Исторический документ не используется для исключения земли.';
+ el('boundary-status').textContent=text;
+}
+async function runBoundary(){
+ if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+ try{const job=await api('/api/planning/boundary',{expected_id:boundaryResult?.id||null});let state;
+ do{await new Promise(r=>setTimeout(r,1000));state=await api('/api/jobs/'+job.job_id);await refreshBoundary()}while(state.state==='running');
+ await refreshRecon();if(state.state==='error')throw Error(state.error);
+ }catch(e){el('boundary-status').textContent+=' Не выполнено: '+e.message}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
+}
+el('boundary-run').addEventListener('click',runBoundary);
+refreshBoundary().catch(e=>el('boundary-status').textContent=e.message);

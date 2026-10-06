@@ -10,12 +10,12 @@ from urllib.parse import urlparse
 from shapely.affinity import rotate
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-from . import store, survey, nspd, nspd_context, torgi, torgi_docs
+from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary
 from .geometry import convert, polygons
 from .review import CHECKS
 
-VERSION=3
-KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context')
+VERSION=4
+KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
 HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru'}
@@ -130,6 +130,7 @@ def document_context(values,numbers):
 def build(values,params):
     s=values['survey'];metric=metric_for(s['bounds']);boundary=box(*s['bounds'])
     context=values.get('nspd_context');entries=nspd_context.projected(context,s['bounds'],metric)
+    historical=values.get('planning_boundary');historical_geometries=planning_boundary.projected(historical,metric)
     excluded_modes=('schemes','planned_parcels') if params.get('avoid_planned',True) else ()
     if params.get('avoid_environment',True):excluded_modes+=nspd_context.ENVIRONMENT
     exclusions=[g for mode in excluded_modes for g,_ in entries[mode]]
@@ -184,6 +185,10 @@ def build(values,params):
         numbers={row.get('cadastral_number')} | {torgi.canonical(n['fields'].get('cad_num')) for n in neighbours if n['distance_m']<=10}
         numbers.discard(None)
         flags=[]
+        boundary_observation=planning_boundary.relate(g,historical_geometries,historical)
+        if boundary_observation:
+            label={'inside':'внутри','outside':'вне','crosses':'пересекает','varies':'положение зависит от операции преобразования'}[boundary_observation['relation']]
+            flags.append('Гипотеза границы Трудового по документу 2021 года: '+label+'; актуальность и система координат не подтверждены')
         context_matches=nspd_context.relate(g,entries,context)
         flags.extend(nspd_context.flags(context_matches))
         if matches['restrictions']:flags.append('Есть пересечение с полученными ЗОУИТ; нужен режим ограничения')
@@ -195,7 +200,7 @@ def build(values,params):
         road=min(roads,key=lambda r:g.distance(r[0])) if roads else None
         candidates.append({**row,'id':digest,'area_m2':round(g.area,2),'point':[round(point.x,7),round(point.y,7)],
                            'road_proximity':{'id':road[1]['id'],'distance_m':round(g.distance(road[0]),1),'fields':public_fields(road[1]),'received_at':layers['parcels'].get('received_at'),'legal_access_confirmed':False} if road else None,
-                           'neighbours':neighbours,'matches':matches,'context_matches':context_matches,'lots':related,'documents':document_context(values,numbers),
+                           'neighbours':neighbours,'matches':matches,'context_matches':context_matches,'boundary_observation':boundary_observation,'lots':related,'documents':document_context(values,numbers),
                            'flags':flags,'required_checks':list(CHECKS.values()),'status':'needs_review','rights_confirmed':False,'srzu_ready':False})
     source_numbers={n for lot in lots for n in lot['cadastral_numbers']}
     sources={'nspd':{mode:{key:layer.get(key) for key in ('source','sha256','received_at')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
@@ -204,11 +209,23 @@ def build(values,params):
                       'complete':False,'documents_current':torgi_docs.same_search(source,values.get('torgi_documents'))},
              'municipal':{'id':(values.get('municipal') or {}).get('id'),'catalog_at':(values.get('municipal') or {}).get('catalog_at'),'complete':False},
              'planning':{'id':(values.get('planning_watch') or {}).get('id'),'geometry_confirmed':False,'complete':False},
+             'historical_boundary':{'id':(historical or {}).get('id'),'applied':bool(historical_geometries),
+                                    'source':copy.deepcopy((historical or {}).get('source')),'limitation':planning_boundary.LIMITATION,
+                                    'current_boundary_confirmed':False,'crs_confirmed':False,
+                                    'history':{'items':copy.deepcopy((historical or {}).get('history',{}).get('items',[])),
+                                               'page_count':len((historical or {}).get('history',{}).get('pages',[])),
+                                               'all_observed_pages_received':(historical or {}).get('history',{}).get('all_observed_pages_received',False),
+                                               'scope':(historical or {}).get('history',{}).get('scope'),'complete':False}},
              'context':nspd_context.sources(context,s['bounds'])}
     map_layers={mode:{'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':f['geometry'],'properties':{'label':public_fields(f).get('cad_num',str(f['id']))}} for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]} for mode in ('parcels','buildings','restrictions')}
     for mode,records in entries.items():
         map_layers[mode]={'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':mapping(shape(f['geometry']).intersection(boundary)),
                      'properties':{'label':str(nspd_context.fields(f).get('cad_num') or nspd_context.fields(f).get('name') or nspd_context.TITLES.get(mode,mode))}} for _,f in records if not shape(f['geometry']).intersection(boundary).is_empty]}
+    map_layers['historical_boundary']={'type':'FeatureCollection','features':[
+        {'type':'Feature','geometry':historical['analysis']['hypotheses'][0]['geometry'],
+         'properties':{'label':'Гипотеза границы Трудового · решение 17.02.2021 · CRS и актуальность не подтверждены',
+                       'current_boundary_confirmed':False,'crs_confirmed':False,'used_for_exclusion':False}}
+    ] if historical_geometries else []}
     return {'created_at':store.now(),'version':VERSION,'survey_id':s['id'],'source_inputs':identities(values),'bounds':s['bounds'],
             'parameters':params,'sources':sources,'candidates':candidates,'layout':layout,'warning':WARNING,
             'map_layers':map_layers,
@@ -310,7 +327,7 @@ def collection(data):
     result=data.get('result') or {}
     return {'type':'FeatureCollection','source_result_id':result.get('id'),'stale':data.get('stale',False),'warning':WARNING,
             'features':[{'type':'Feature','id':c['id'],'geometry':c['geometry'],
-                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
 
 
 def html_report(data,candidate_id=None):
@@ -323,6 +340,10 @@ def html_report(data,candidate_id=None):
     names={'draft':'Пробный контур','gap':'Промежуток для проектирования','offer':'Предложение НСПД','auction':'Торги / слой аукционов'}
     for c in candidates:
         evidence=[]
+        observation=c.get('boundary_observation')
+        if observation:
+            label={'inside':'внутри','outside':'вне','crosses':'пересекает','varies':'зависит от преобразования'}[observation['relation']]
+            evidence.append('<li>Гипотеза границы Трудового: '+esc(label)+' · <a href="'+esc(safe_url(observation['source']['url']))+'">Решение № 396 от 17.02.2021</a> · получено '+esc(observation['source']['received_at'])+' · SHA-256 '+esc(observation['source']['sha256'])+' · '+esc(observation['limitation'])+'<pre>'+esc(json.dumps(observation['observations'],ensure_ascii=False,indent=2))+'</pre></li>')
         for mode,rows in c['matches'].items():
             for row in rows:evidence.append('<li>'+esc(mode)+' · '+esc(row['area_m2'])+' м² · '+esc(json.dumps(row['fields'],ensure_ascii=False))+' · '+esc(row['received_at'])+'</li>')
         for mode,rows in c.get('context_matches',{}).items():
@@ -340,4 +361,7 @@ def html_report(data,candidate_id=None):
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}@media print{section{break-before:page}}</style>'
             +'<h1>Поиск участков: рабочее досье</h1><p>'+esc(WARNING)+'</p><p>'+('Предыдущая версия: источники изменились.' if data.get('stale') else 'Датированная версия расчёта.')+'</p><p>Расчёт '+esc(result.get('created_at'))+'; цель '+esc(PURPOSES.get(result.get('parameters',{}).get('purpose'),'Не выбрана'))+'.</p>'
             +'<p>Подтверждённых свободных участков: 0. Досье не является СРЗУ или заявлением.</p>'
-            +''.join('<p>'+esc(w)+'</p>' for w in result.get('operation_warnings',[]))+''.join(blocks)+'<h2>Источники и даты</h2><pre>'+esc(json.dumps(result.get('sources',{}),ensure_ascii=False,indent=2))+'</pre></html>').encode('utf-8')
+            +''.join('<p>'+esc(w)+'</p>' for w in result.get('operation_warnings',[]))+''.join(blocks)
+            +'<h2>Ссылки из перечней ГП/ПЗЗ</h2><p>Документы относятся к поселению. Применимость к этому контуру и вступление в силу не подтверждены; PDF этой проверкой не прочитаны.</p><ul>'
+            +''.join('<li><a href="'+esc(safe_url(item['url']))+'">'+esc(item['title'])+'</a> · '+esc(json.dumps(item['references'],ensure_ascii=False))+'</li>' for item in result.get('sources',{}).get('historical_boundary',{}).get('history',{}).get('items',[]))
+            +'</ul><h2>Источники и даты</h2><pre>'+esc(json.dumps(result.get('sources',{}),ensure_ascii=False,indent=2))+'</pre></html>').encode('utf-8')

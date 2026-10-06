@@ -69,6 +69,26 @@ def test_recon_page_serves_new_workflow(server):
     with request(server,'/recon.js') as response:assert b'/api/recon/watch' in response.read()
 
 
+def test_boundary_export_and_protected_refresh_job(server,monkeypatch):
+    import time
+    store.set_setting('planning_boundary_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/planning/boundary/export') as response:
+        assert 'historical-boundary-and-planning-listings.json' in response.headers['Content-Disposition']
+        data=json.load(response)
+    assert data['result'] is None and data['attempt']['state']=='interrupted'
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/planning/boundary',{},token=False)
+    assert error.value.code==403
+    monkeypatch.setattr(app.planning_boundary,'run',lambda project,params:{'points':198,'legal_status_confirmed':False})
+    with request(server,'/api/planning/boundary',{'expected_id':None}) as response:job_id=json.load(response)['job_id']
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done' and job['result']=={'points':198,'legal_status_confirmed':False}
+    with request(server,'/nspd.html') as response:
+        page=response.read();assert b'id="boundary-run"' in page and b'id="boundary-show"' in page
+
+
 def test_district_report_and_protected_operations(server, monkeypatch):
     from land import planning_watch
     with request(server,'/api/planning/export') as r:

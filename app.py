@@ -21,7 +21,7 @@ from land.exports import bundle, dossier
 from land import nspd
 from land import survey
 from land import publications
-from land import planning_watch, planning_maps
+from land import planning_watch, planning_maps, planning_boundary
 from land import torgi
 from land import municipal
 from land import municipal_local
@@ -217,6 +217,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/planning', '/api/planning/export'):
                 return self.send(planning_watch.report(project), filename='district-document-versions.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/planning/boundary', '/api/planning/boundary/export'):
+                data=planning_boundary.report(project)
+                with JOB_LOCK:
+                    active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
+                if data['attempt'] and data['attempt']['state']=='running' and not active:
+                    data['attempt']=dict(data['attempt'],state='interrupted')
+                return self.send(data, filename='historical-boundary-and-planning-listings.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/planning/maps', '/api/planning/maps/export'):
                 data = planning_maps.report(project)
                 with JOB_LOCK:
@@ -360,6 +367,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Проверка официальных публикаций', lambda: publications.run(project)))
             if path == '/api/planning/catalog':
                 return self.send(launch_job(project, 'Перечни документов района и ПЗЗ', lambda: planning_watch.catalog(project)))
+            if path == '/api/planning/boundary':
+                return self.send(launch_job(project, 'Историческая граница и перечни ГП/ПЗЗ', lambda: planning_boundary.run(project, data)))
             if path == '/api/planning/read':
                 return self.send(launch_job(project, 'Версии и реквизиты PDF района', lambda: planning_watch.read(project, data)))
             if path == '/api/planning/maps':
