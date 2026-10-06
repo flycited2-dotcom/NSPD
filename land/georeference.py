@@ -59,6 +59,51 @@ def receive(cad):
     return {'source':url,'sha256':digest,'received_at':store.now(),'geojson':nspd.normalize(raw)}
 
 
+def control_window(doc,cad):
+    """Fixed transform only locates a bounded query; it does not validate the CRS."""
+    tables=[t for t in doc['tables'] if t['state']=='review_required' and t.get('outline_xy')
+            and (m:=LABEL.fullmatch(t['label'])) and m[1]==cad]
+    if not tables:raise ValueError('Нет подписанных таблиц контрольного участка для запроса по области')
+    selected=operation()
+    polygons=[transform(lambda x,y:selected.transform(y,x,errcheck=True),Polygon(t['outline_xy'])) for t in tables]
+    if any(g.is_empty or not g.is_valid or not box(34,44.33,37,46).covers(g) for g in polygons):
+        raise ValueError('Область контрольного запроса некорректна или вне проверяемого варианта СК-63')
+    candidate=unary_union(polygons)
+    metric_crs=32600+int((candidate.centroid.x+180)//6)+1
+    forward=Transformer.from_crs(4326,metric_crs,always_xy=True)
+    inverse=Transformer.from_crs(metric_crs,4326,always_xy=True)
+    metric=transform(forward.transform,candidate).envelope.buffer(25).envelope
+    if metric.area>1_000_000:raise ValueError('Область контрольного запроса превышает 1 км²')
+    bounds=list(transform(inverse.transform,metric).bounds)
+    if not box(34,44.33,37,46).covers(box(*bounds)):
+        raise ValueError('Область контрольного запроса вне проверяемого варианта СК-63')
+    query_area=transform(forward.transform,box(*bounds)).area
+    if query_area>1_000_000:raise ValueError('Итоговая область контрольного запроса превышает 1 км²')
+    return bounds,{'basis':'signed_control_tables_fixed_transform','source_crs':'EPSG:7829',
+                   'operation_code':'EPSG:5044','padding_m':25,'metric_crs':f'EPSG:{metric_crs}',
+                   'window_area_m2':round(metric.area,2),'query_area_m2':round(query_area,2),'crs_confirmed':False}
+
+
+def receive_spatial(doc,cad):
+    bounds,basis=control_window(doc,cad)
+    category=nspd.catalog()['parcels']['categoryId']
+    body=nspd.spatial_body(bounds,category)
+    raw,digest=nspd.request_json(nspd.INTERSECTS,body)
+    fc=nspd.normalize(raw)
+    if any(f['properties'].get('category')!=category for f in fc['features']):
+        raise ValueError('Категория объектов не соответствует контрольному слою ЕГРН')
+    matched=[f for f in fc['features'] if f['properties'].get('options',{}).get('cad_num')==cad]
+    if len(matched)!=1:raise ValueError('Пространственный ответ не содержит единственный точный номер контрольного участка')
+    reference={'source':nspd.INTERSECTS,'sha256':digest,'received_at':store.now(),'geojson':fc,
+               'retrieval_method':'spatial_control_window','requested_cadastral_number':cad,
+               'request':body,'query_bounds':bounds,'window_basis':basis,'response_count':len(fc['features'])}
+    folder=store.DATA/'georeference_sources';folder.mkdir(exist_ok=True)
+    snapshot=digest+'-'+hashlib.sha256(json.dumps(reference,sort_keys=True).encode()).hexdigest()[:20]+'.json'
+    reference['source_snapshot']=snapshot
+    (folder/snapshot).write_text(json.dumps({'reference':reference,'raw_response':raw},ensure_ascii=False,indent=2),encoding='utf-8')
+    return reference
+
+
 def parts(g):
     return list(g.geoms) if g.geom_type=='MultiPolygon' else [g]
 
@@ -119,7 +164,8 @@ def evaluate(doc,schemes_id,cad,reference,survey=None):
         epsg_metadata=dict(db.execute("SELECT key,value FROM metadata WHERE key IN ('EPSG.VERSION','EPSG.DATE')"))
     result={'document_id':doc['document_id'],'title':doc['title'],'url':doc['url'],
             'source_pdf_sha256':doc['source_sha256'],'source_pdf_received_at':doc['source_received_at'],
-            'schemes_id':schemes_id,'cadastral_number':cad,'reference':{k:reference[k] for k in ('source','sha256','received_at')},
+            'schemes_id':schemes_id,'cadastral_number':cad,'reference':{k:reference[k] for k in ('source','sha256','received_at','retrieval_method',
+                'requested_cadastral_number','request','query_bounds','window_basis','response_count','source_snapshot') if k in reference},
             'reference_geojson':{'type':'FeatureCollection','features':matched},
             'state':'consistent_with_reference' if boundary_consistent else 'vertices_consistent_boundary_differs' if coordinates_consistent else 'reference_disagrees',
             'warning':WARNING,'source_crs':'EPSG:7829','source_axes':'PDF X=northing, Y=easting',
@@ -150,6 +196,7 @@ def evaluate(doc,schemes_id,cad,reference,survey=None):
 
 
 def persist(project,result):
+    result['previous_result_id']=(store.get_setting('georeference_'+project) or {}).get('id')
     result['checked_at']=store.now()
     result['id']=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()[:20]
     folder=store.DATA/'georeference';folder.mkdir(exist_ok=True)
@@ -160,13 +207,19 @@ def persist(project,result):
 
 def run(project,params):
     current,doc,cad=document(project,params)
-    attempt={'state':'running','started_at':store.now(),'document_id':doc['document_id'],'cadastral_number':cad}
+    mode=params.get('reference_mode','spatial')
+    if mode not in ('spatial','number'):raise ValueError('Неизвестный способ получения контрольного объекта')
+    attempt={'state':'running','started_at':store.now(),'document_id':doc['document_id'],'cadastral_number':cad,'reference_mode':mode}
     store.set_setting('georeference_attempt_'+project,attempt)
     try:
-        reference=receive(cad)
-        result=evaluate(doc,current['id'],cad,reference,store.get_setting('survey_'+project))
-        document(project,params)  # Recheck revision and source bytes after network/transform work.
-        persist(project,result)
+        reference=receive_spatial(doc,cad) if mode=='spatial' else receive(cad)
+        survey=store.get_setting('survey_'+project)
+        result=evaluate(doc,current['id'],cad,reference,survey)
+        with store.LOCK:
+            document(project,params)  # Recheck revision and source bytes after network/transform work.
+            if (store.get_setting('survey_'+project) or {}).get('id')!=(survey or {}).get('id'):
+                raise ValueError('Обследование изменилось во время проверки; прежняя геопривязка сохранена')
+            persist(project,result)
         attempt.update(state='done',finished_at=store.now(),result_state=result['state'])
         return {'id':result['id'],'state':result['state']}
     except Exception as exc:
