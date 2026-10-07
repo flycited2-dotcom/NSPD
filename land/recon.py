@@ -14,8 +14,8 @@ from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_bou
 from .geometry import convert, polygons
 from .review import CHECKS
 
-VERSION=7
-KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations')
+VERSION=8
+KEYS=('survey','torgi','torgi_active','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
 HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru'}
@@ -25,13 +25,14 @@ def options(params):
     result=survey.parameters(params)
     result.update(purpose=params.get('purpose','unspecified'),target_area=float(params.get('target_area',1000)),
                   limit=params.get('limit',10),refresh_nspd=params.get('refresh_nspd',True),
+                  verify_nspd=params.get('verify_nspd',True),refresh_active_torgi=params.get('refresh_active_torgi',False),
                   refresh_torgi=params.get('refresh_torgi',False),avoid_restrictions=params.get('avoid_restrictions',True),avoid_planned=params.get('avoid_planned',True),avoid_environment=params.get('avoid_environment',True),query=str(params.get('query','Трудовое')).strip())
     if result['purpose'] not in PURPOSES:raise ValueError('Неизвестная цель использования')
     if not math.isfinite(result['target_area']) or not result['min_area']<=result['target_area']<=result['max_area']:
         raise ValueError('Площадь пробного контура должна находиться между минимальной и максимальной')
     if math.sqrt(result['target_area'])<result['min_width']:raise ValueError('Выбранная площадь меньше квадрата заданной ширины')
     if isinstance(result['limit'],bool) or not isinstance(result['limit'],int) or not 1<=result['limit']<=20:raise ValueError('Допустимо от 1 до 20 контуров')
-    if any(not isinstance(result[k],bool) for k in ('refresh_nspd','refresh_torgi','avoid_restrictions','avoid_planned','avoid_environment')):raise ValueError('Параметры обновления и исключения должны быть логическими')
+    if any(not isinstance(result[k],bool) for k in ('refresh_nspd','verify_nspd','refresh_torgi','refresh_active_torgi','avoid_restrictions','avoid_planned','avoid_environment')):raise ValueError('Параметры обновления и исключения должны быть логическими')
     if not 2<=len(result['query'])<=120 or any(ord(c)<32 for c in result['query']):raise ValueError('Некорректный текст поиска торгов')
     return result
 
@@ -166,10 +167,20 @@ def build(values,params):
     occupied=[shape(f['geometry']) for mode in ('parcels','buildings') for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]
     for row in rows:
         if any(shape(row['geometry']).intersection(g).area>0 for g in occupied):raise ValueError('Пробный контур пересекает полученный участок или здание')
-    source=values.get('torgi');observations=torgi.combined_geometries(source,s,(source or {}).get('lots',[]))
-    lots=torgi.relate(copy.deepcopy((source or {}).get('lots',[])),observations,s)
-    by_number={};source_age=age_days((source or {}).get('created_at'))
+    source=values.get('torgi');active_source=values.get('torgi_active')
+    indexed_lots={}
+    for snapshot,regional in ((source,False),(active_source,True)):
+        for original in (snapshot or {}).get('lots',[]):
+            item=copy.deepcopy(original)
+            item.update(search_date=snapshot.get('created_at'),search_id=snapshot.get('id'),regional_active=regional,
+                        documents_current=not regional and torgi_docs.same_search(source,values.get('torgi_documents')))
+            indexed_lots[item['id']]=item
+    geometry_source={'geometries':{**(source or {}).get('geometries',{}),**(active_source or {}).get('geometries',{})}}
+    observations=torgi.combined_geometries(geometry_source,s,list(indexed_lots.values()))
+    lots=torgi.relate(list(indexed_lots.values()),observations,s)
+    by_number={}
     for lot in lots:
+        source_age=age_days(lot.get('search_date'))
         active=lot.get('status') in ('PUBLISHED','APPLICATIONS_SUBMISSION') and not lot.get('stopped') and not lot.get('annulled') and torgi.deadline_state(lot,store.now())=='future' and source_age is not None and 0<=source_age<=1
         lot['active_observed']=active
         if active:
@@ -203,11 +214,13 @@ def build(values,params):
         related=[]
         for lot in lots:
             used=[m for m in lot['spatial_matches'] if g.intersection(convert(shape(m['feature']['geometry']),4326,metric)).area>.01]
+            if not used:continue
             overlap=g.intersection(unary_union([convert(shape(m['feature']['geometry']),4326,metric) for m in used])).area
             if overlap>.01:related.append({'id':lot['id'],'url':safe_url(lot['url']),'status':lot['status'],'deadline':lot.get('deadline'),
-                                          'active_observed':lot['active_observed'],'overlap_m2':round(overlap,2),'search_date':(source or {}).get('created_at'),
+                                          'active_observed':lot['active_observed'],'overlap_m2':round(overlap,2),'search_date':lot.get('search_date'),
+                                          'search_id':lot.get('search_id'),'regional_active':lot.get('regional_active',False),
                                           'geometry_sources':[{'cadastral_number':m['cadastral_number'],**{key:observations[m['cadastral_number']].get(key) for key in ('source','received_at','sha256')}} for m in used],
-                                          'documents_current':torgi_docs.same_search(source,values.get('torgi_documents'))})
+                                          'documents_current':lot['documents_current']})
         numbers={row.get('cadastral_number')} | {torgi.canonical(n['fields'].get('cad_num')) for n in neighbours if n['distance_m']<=10}
         numbers.discard(None)
         flags=[]
@@ -230,11 +243,18 @@ def build(values,params):
                            'flags':flags,'required_checks':list(CHECKS.values()),'status':'needs_review','rights_confirmed':False,'srzu_ready':False})
     for candidate in candidates:
         candidate['land_status']=land_status.assessment(candidate,values)
-    source_numbers={n for lot in lots for n in lot['cadastral_numbers']}
-    sources={'nspd':{mode:{key:layer.get(key) for key in ('source','sha256','received_at')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
+    source_numbers={n for lot in (source or {}).get('lots',[]) for n in lot['cadastral_numbers']}
+    active_numbers={n for lot in (active_source or {}).get('lots',[]) for n in lot['cadastral_numbers']}
+    sources={'nspd':{mode:{key:copy.deepcopy(layer.get(key)) for key in ('source','sha256','sha256_kind','received_at','coverage','observations')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
              'torgi':{'id':(source or {}).get('id'),'received_at':(source or {}).get('created_at'),'query':(source or {}).get('query'),
-                      'lots':len(lots),'unlocated_numbers':sorted(n for n in source_numbers if not observations.get(n,{}).get('features')),
+                      'lots':len((source or {}).get('lots',[])),'unlocated_numbers':sorted(n for n in source_numbers if not observations.get(n,{}).get('features')),
                       'complete':False,'documents_current':torgi_docs.same_search(source,values.get('torgi_documents'))},
+             'torgi_active':{'id':(active_source or {}).get('id'),'received_at':(active_source or {}).get('created_at'),
+                             'lots':len((active_source or {}).get('lots',[])),
+                             'query_pages_received':bool((active_source or {}).get('query_pages_received')),
+                             'unlocated_numbers':sorted(n for n in active_numbers if not observations.get(n,{}).get('features')),
+                             'lots_without_number':sum(not lot['cadastral_numbers'] for lot in (active_source or {}).get('lots',[])),
+                             'complete':False,'warning':torgi.ACTIVE_WARNING},
              'municipal':{'id':(values.get('municipal') or {}).get('id'),'catalog_at':(values.get('municipal') or {}).get('catalog_at'),'complete':False},
              'land_status':land_status.procedures(values.get('municipal')),
              'planning':{'id':(values.get('planning_watch') or {}).get('id'),
@@ -305,6 +325,10 @@ def run(project,params):
             attempt['step']='Обновление поиска торгов';store.set_setting('recon_attempt_'+project,attempt)
             try:torgi.run(project,{'query':settings['query'],'history':True})
             except Exception as exc:attempt['warnings'].append('Торги не обновлены; используется датированный прежний поиск: '+str(exc)[:300])
+        if settings['refresh_active_torgi']:
+            attempt['step']='Земельные публикации по всему Крыму';store.set_setting('recon_attempt_'+project,attempt)
+            try:torgi.run(project,{},active=True)
+            except Exception as exc:attempt['warnings'].append('Региональные публикации не обновлены; прежняя выборка сохранена: '+str(exc)[:300])
         attempt['step']='Подбор контуров и сверка источников';store.set_setting('recon_attempt_'+project,attempt)
         values=inputs(project);result=build(values,settings)
         result.update(previous_result_id=(old or {}).get('id'),operation_warnings=attempt['warnings'])

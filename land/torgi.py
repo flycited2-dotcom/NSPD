@@ -15,6 +15,11 @@ SEARCH = 'https://torgi.gov.ru/new/api/public/lotcards/search'
 PAGE_SIZE, MAX_PAGES, MAX_GEOMETRIES = 10, 20, 20
 CAD = re.compile(r'(?<![\d:])\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10}(?![\d:])')
 WARNING = 'Поиск по тексту, региону Крым и земельной категории; не полный реестр земли выбранной области. История процедуры не подтверждает сегодняшнюю доступность. Заявления, не опубликованные в источнике, не видны. Геометрия берётся отдельно из НСПД и не заменяет схему лота.'
+ACTIVE_WARNING = 'Получены публикации земельной категории по Крыму со статусами «Опубликован» и «Приём заявок», без текстового адресного фильтра. Все страницы запроса не подтверждают полноту извещений или свободность земли. Лоты без геометрии остаются неопределёнными относительно области.'
+
+
+def setting_key(project, active=False, suffix=''):
+    return ('torgi_active' if active else 'torgi') + suffix + '_' + project
 
 
 def canonical(value):
@@ -81,6 +86,12 @@ def source_id(result):
     return (result or {}).get('search_source_id') or (result or {}).get('id')
 
 
+def survey_signature(survey):
+    if not survey:return None
+    relevant={'bounds':survey['bounds'],'geometries':survey_geometries(survey),'gaps':survey.get('gaps')}
+    return hashlib.sha256(json.dumps(relevant,sort_keys=True).encode()).hexdigest()
+
+
 def combined_geometries(previous,survey,lots):
     numbers={n for lot in lots for n in lot['cadastral_numbers']}
     observations={n:copy.deepcopy(o) for n,o in (previous or {}).get('geometries',{}).items() if n in numbers and o.get('lookup')}
@@ -89,34 +100,34 @@ def combined_geometries(previous,survey,lots):
     return observations
 
 
-def rematch(project,params):
-    previous=store.get_setting('torgi_'+project)
+def rematch(project,params,active=False):
+    previous=store.get_setting(setting_key(project,active))
     survey=store.get_setting('survey_'+project)
     if not previous or params.get('id')!=previous['id']:
         raise ValueError('Поиск изменился; обновите страницу')
     if not survey or params.get('survey_id')!=survey['id']:
         raise ValueError('Обследование изменилось; обновите страницу')
     attempt={'state':'running','started_at':store.now(),'network_requests':0}
-    store.set_setting('torgi_rematch_attempt_'+project,attempt)
+    store.set_setting(setting_key(project,active,'_rematch_attempt'),attempt)
     try:
         result=copy.deepcopy(previous)
         observations=combined_geometries(previous,survey,result['lots'])
         numbers={n for lot in result['lots'] for n in lot['cadastral_numbers']}
         missing=sorted(n for n in numbers if not observations.get(n,{}).get('features'))
         result.update(parent_id=previous['id'],search_source_id=source_id(previous),rematched_at=store.now(),
-                      survey_id=survey['id'],survey_bounds=survey['bounds'],geometries=observations,
+                      survey_id=survey['id'],survey_signature=survey_signature(survey),survey_bounds=survey['bounds'],geometries=observations,
                       lots=relate(result['lots'],observations,survey),rematch_network_requests=0,rematch_unlocated_numbers=missing)
         with store.LOCK:
-            if (store.get_setting('torgi_'+project) or {}).get('id')!=previous['id'] or (store.get_setting('survey_'+project) or {}).get('id')!=survey['id']:
+            if (store.get_setting(setting_key(project,active)) or {}).get('id')!=previous['id'] or (store.get_setting('survey_'+project) or {}).get('id')!=survey['id']:
                 raise ValueError('Поиск или обследование изменились во время сопоставления; результат не записан')
-            persist(project,result)
+            persist(project,result,active)
             with store.connect() as db:store.event(db,project,'torgi_rematch',{'id':result['id'],'survey_id':survey['id'],'network_requests':0})
         attempt.update(state='done',finished_at=store.now())
         return {'id':result['id'],'count':sum(lot['in_survey'] for lot in result['lots']),
                 'unlocated_numbers':len(missing),'lots_without_number':sum(not lot['cadastral_numbers'] for lot in result['lots']),'network_requests':0}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
-    finally:store.set_setting('torgi_rematch_attempt_'+project,attempt)
+    finally:store.set_setting(setting_key(project,active,'_rematch_attempt'),attempt)
 
 
 def relate(lots, geometries, survey):
@@ -146,27 +157,31 @@ def relate(lots, geometries, survey):
                 lot['spatial_matches'].append({'cadastral_number': number, 'feature': f, 'gap_intersections': overlaps,
                                              'survey_intersection_m2': round(convert(intersection, 4326, metric).area, 2)})
         lot['in_survey'] = bool(lot['spatial_matches'])
+        all_located = bool(lot['cadastral_numbers']) and all(geometries.get(n, {}).get('features') for n in lot['cadastral_numbers'])
+        lot['spatial_state'] = 'inside' if lot['in_survey'] else 'outside' if boundary is not None and all_located else 'unknown'
     return lots
 
 
-def persist(project, result):
+def persist(project, result, active=False):
     result['id'] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()[:20]
     folder = store.DATA / 'torgi'
     folder.mkdir(exist_ok=True)
     (folder / (result['id'] + '.json')).write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
-    store.set_setting('torgi_' + project, result)
+    store.set_setting(setting_key(project,active), result)
 
 
-def run(project, params):
-    previous=store.get_setting('torgi_'+project)
+def run(project, params, active=False):
+    previous=store.get_setting(setting_key(project,active))
     query = str(params.get('query', 'Трудовое')).strip()
-    if not 2 <= len(query) <= 120 or any(ord(c) < 32 for c in query):
+    if active:
+        query = ''
+    if not active and (not 2 <= len(query) <= 120 or any(ord(c) < 32 for c in query)):
         raise ValueError('Поисковый текст должен содержать от 2 до 120 символов')
-    history = params.get('history', True)
+    history = False if active else params.get('history', True)
     if not isinstance(history, bool):
         raise ValueError('Некорректный фильтр истории')
     attempt = {'state': 'running', 'started_at': store.now(), 'query': query, 'pages_received': 0}
-    store.set_setting('torgi_attempt_' + project, attempt)
+    store.set_setting(setting_key(project,active,'_attempt'), attempt)
     rows, pages, total, seen = [], [], None, set()
     try:
         for page in range(MAX_PAGES):
@@ -174,6 +189,8 @@ def run(project, params):
                 time.sleep(1)
             args = {'dynSubjRF': '12', 'catCode': '2', 'text': query, 'matchPhrase': 'false', 'byFirstVersion': 'true',
                     'withFacets': 'true' if page == 0 else 'false', 'size': PAGE_SIZE, 'sort': 'firstVersionPublicationDate,desc'}
+            if active:
+                args.pop('text')
             if page:
                 args['page'] = page
             if not history:
@@ -195,6 +212,8 @@ def run(project, params):
             total = count
             for row in content:
                 item = normalize(row)
+                if active and item['status'] not in ('PUBLISHED', 'APPLICATIONS_SUBMISSION'):
+                    raise ValueError('Ответ содержит другой статус; прежняя региональная выборка сохранена')
                 if item['id'] in seen:
                     raise ValueError('Повтор лота между страницами; полнота не подтверждена')
                 seen.add(item['id'])
@@ -205,7 +224,7 @@ def run(project, params):
             folder.mkdir(exist_ok=True)
             (folder / (pages[-1]['sha256'] + '.source.json')).write_bytes(raw)
             attempt.update(pages_received=len(pages), total=total)
-            store.set_setting('torgi_attempt_' + project, attempt)
+            store.set_setting(setting_key(project,active,'_attempt'), attempt)
             if data['last']:
                 if len(rows) != total:
                     raise ValueError('Число полученных лотов не совпадает с итогом поиска')
@@ -218,15 +237,17 @@ def run(project, params):
         observations=combined_geometries(previous,survey,rows)
         source_digest=hashlib.sha256(json.dumps({'query':query,'history':history,'pages':pages,'previous_search_source_id':source_id(previous)},sort_keys=True).encode()).hexdigest()[:20]
         result = {'created_at': store.now(), 'query': query, 'history': history, 'region': 'Крым', 'category': 'Земельные участки',
-                  'pages': pages, 'reported_total': total, 'query_pages_received': True, 'complete': False, 'warning': WARNING,
+                  'pages': pages, 'reported_total': total, 'query_pages_received': True, 'complete': False,
+                  'scope':'regional_active' if active else 'text', 'warning': ACTIVE_WARNING if active else WARNING,
                   'survey_id': survey['id'] if survey else None, 'survey_bounds': survey['bounds'] if survey else None,
+                  'survey_signature':survey_signature(survey),
                   'lots': relate(rows, observations, survey), 'geometries': observations,
                   'search_source_id':source_digest,'parent_id':(previous or {}).get('id')}
         with store.LOCK:
-            if (store.get_setting('torgi_'+project) or {}).get('id')!=(previous or {}).get('id') or (store.get_setting('survey_'+project) or {}).get('id')!=(survey or {}).get('id'):
+            if (store.get_setting(setting_key(project,active)) or {}).get('id')!=(previous or {}).get('id') or (store.get_setting('survey_'+project) or {}).get('id')!=(survey or {}).get('id'):
                 raise ValueError('Поиск или обследование изменились во время загрузки; результат не записан')
-            persist(project, result)
-        store.set_setting('torgi_geometry_attempt_' + project, None)
+            persist(project, result, active)
+        store.set_setting(setting_key(project,active,'_geometry_attempt'), None)
         attempt.update(state='done', finished_at=store.now())
         with store.connect() as db:
             store.event(db, project, 'torgi_search', {'id': result['id'], 'query': query, 'count': len(rows), 'pages': len(pages)})
@@ -235,11 +256,11 @@ def run(project, params):
         attempt.update(state='error', error=str(exc), finished_at=store.now())
         raise
     finally:
-        store.set_setting('torgi_attempt_' + project, attempt)
+        store.set_setting(setting_key(project,active,'_attempt'), attempt)
 
 
-def locate(project, params):
-    previous = store.get_setting('torgi_' + project, None)
+def locate(project, params, active=False):
+    previous = store.get_setting(setting_key(project,active), None)
     survey = store.get_setting('survey_' + project, None)
     if not previous or params.get('id') != previous['id']:
         raise ValueError('Поиск изменился; обновите страницу')
@@ -254,10 +275,16 @@ def locate(project, params):
     numbers = sorted({n for lot in result['lots'] for n in lot['cadastral_numbers']
                       if n not in observations or observations[n].get('state') == 'error'
                       or (retry and observations[n].get('state') in retry_states)})
+    deferred = []
+    if active:
+        prefixes = {':'.join(n.split(':')[:2]) for n in survey_geometries(survey)}
+        if prefixes:
+            deferred = [n for n in numbers if ':'.join(n.split(':')[:2]) not in prefixes]
+            numbers = [n for n in numbers if n not in deferred]
     checked = set()
     attempt = {'state': 'running', 'started_at': store.now(), 'processed': 0,
                'requested': min(len(numbers), MAX_GEOMETRIES), 'retry_missing': retry}
-    store.set_setting('torgi_geometry_attempt_' + project, attempt)
+    store.set_setting(setting_key(project,active,'_geometry_attempt'), attempt)
     try:
         for number in numbers[:MAX_GEOMETRIES]:
             url = nspd.BASE + '/api/geoportal/v2/search/geoportal?' + urlencode({'thematicSearchId': 1, 'query': number})
@@ -270,7 +297,7 @@ def locate(project, params):
                     observations[number] = {'features': [], 'source': url, 'sha256': digest, 'received_at': store.now(),
                                             'lookup': True, 'state': 'rejected', 'error': str(exc)}
                     attempt['processed'] += 1
-                    store.set_setting('torgi_geometry_attempt_' + project, attempt)
+                    store.set_setting(setting_key(project,active,'_geometry_attempt'), attempt)
                     continue  # bad geometry is local to this number, never repaired or accepted
                 # Neighbouring numbers mentioned in the text are never accepted as lot geometry.
                 fs = [f for f in fc['features'] if f['properties'].get('category') == nspd.catalog()['parcels']['categoryId'] and canonical(f['properties'].get('options', {}).get('cad_num') or f['properties'].get('label')) == number]
@@ -281,17 +308,24 @@ def locate(project, params):
                     observations[number] = {'features': [], 'source': url, 'received_at': store.now(), 'lookup': True,
                                             'state': 'not_returned', 'http_status': 404, 'error': 'HTTP 404: геометрия не получена; существование и права не установлены'}
                     attempt['processed'] += 1
-                    store.set_setting('torgi_geometry_attempt_' + project, attempt)
+                    store.set_setting(setting_key(project,active,'_geometry_attempt'), attempt)
                     continue
                 observations[number] = {'features': [], 'source': url, 'received_at': store.now(), 'lookup': True, 'state': 'error', 'error': str(exc)}
                 attempt.update(error=str(exc), state='partial')
                 break  # no further requests after an access or transport error
             attempt['processed'] += 1
-            store.set_setting('torgi_geometry_attempt_' + project, attempt)
+            store.set_setting(setting_key(project,active,'_geometry_attempt'), attempt)
         result.update(parent_id=previous['id'], search_source_id=source_id(previous), geometry_checked_at=store.now(), survey_id=survey['id'], survey_bounds=survey['bounds'],
+                      survey_signature=survey_signature(survey),
                       geometries=observations, lots=relate(result['lots'], observations, survey), geometry_limit=MAX_GEOMETRIES,
                       geometry_unchecked_numbers=[n for n in numbers if n not in checked])
-        persist(project, result)
+        if active:
+            result.update(geometry_deferred_numbers=deferred,
+                          geometry_priority='Сначала номера кадастрового района обследования; остальные не проверены и не исключены по геометрии')
+        with store.LOCK:
+            if (store.get_setting(setting_key(project,active)) or {}).get('id') != previous['id'] or (store.get_setting('survey_'+project) or {}).get('id') != survey['id']:
+                raise ValueError('Поиск или обследование изменились во время проверки геометрии; прежний результат сохранён')
+            persist(project, result, active)
         if attempt['state'] == 'running':
             attempt['state'] = 'done'
         attempt['finished_at'] = store.now()
@@ -302,4 +336,4 @@ def locate(project, params):
         attempt.update(state='error', error=str(exc), finished_at=store.now())
         raise
     finally:
-        store.set_setting('torgi_geometry_attempt_' + project, attempt)
+        store.set_setting(setting_key(project,active,'_geometry_attempt'), attempt)

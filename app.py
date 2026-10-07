@@ -1,5 +1,6 @@
 """Launch: python app.py. Local-only HTTP workspace with auditable GIS jobs."""
 import argparse
+import socket
 import json
 import mimetypes
 import os
@@ -263,11 +264,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(planning_maps.html_report(project), content_type='text/html; charset=utf-8')
             if p.path == '/api/planning/report':
                 return self.send(planning_watch.html_report(project), content_type='text/html; charset=utf-8')
-            if p.path in ('/api/torgi', '/api/torgi/export'):
-                result = store.get_setting('torgi_' + project, None)
-                attempt = store.get_setting('torgi_attempt_' + project, None)
-                geometry_attempt = store.get_setting('torgi_geometry_attempt_' + project, None)
-                rematch_attempt = store.get_setting('torgi_rematch_attempt_' + project, None)
+            if p.path in ('/api/torgi', '/api/torgi/export', '/api/torgi/active', '/api/torgi/active/export'):
+                regional = '/active' in p.path
+                result = store.get_setting(torgi.setting_key(project,regional), None)
+                attempt = store.get_setting(torgi.setting_key(project,regional,'_attempt'), None)
+                geometry_attempt = store.get_setting(torgi.setting_key(project,regional,'_geometry_attempt'), None)
+                rematch_attempt = store.get_setting(torgi.setting_key(project,regional,'_rematch_attempt'), None)
                 with JOB_LOCK:
                     active = any(j['state'] == 'running' and j['project'] == project for j in JOBS.values())
                 if not active:
@@ -278,7 +280,8 @@ class Handler(BaseHTTPRequestHandler):
                     if rematch_attempt and rematch_attempt['state'] == 'running':
                         rematch_attempt = dict(rematch_attempt, state='interrupted')
                 return self.send({'result': result, 'attempt': attempt, 'geometry_attempt': geometry_attempt,'rematch_attempt':rematch_attempt,
-                                  'current_survey_id': (store.get_setting('survey_' + project, {}) or {}).get('id')},
+                                  'current_survey_id': (store.get_setting('survey_' + project, {}) or {}).get('id'),
+                                  'current_survey_signature':torgi.survey_signature(store.get_setting('survey_'+project))},
                                  filename='torgi-observed.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/survey', '/api/survey/export'):
                 result = store.get_setting('survey_' + project, None)
@@ -408,6 +411,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Изображения следующих трёх карт ПЗЗ', lambda: planning_maps.render(project, data)))
             if path == '/api/torgi':
                 return self.send(launch_job(project, 'Поиск лотов ГИС Торги', lambda: torgi.run(project, data)))
+            if path == '/api/torgi/active':
+                return self.send(launch_job(project, 'Земельные публикации по всему Крыму', lambda: torgi.run(project, data, active=True)))
+            if path == '/api/torgi/active/geometry':
+                return self.send(launch_job(project, 'Геометрия региональных публикаций', lambda: torgi.locate(project, data, active=True)))
+            if path == '/api/torgi/active/rematch':
+                return self.send(launch_job(project, 'Сопоставление региональных публикаций', lambda: torgi.rematch(project, data, active=True)))
             if path == '/api/torgi/geometry':
                 return self.send(launch_job(project, 'Сопоставление лотов с областью', lambda: torgi.locate(project, data)))
             if path == '/api/torgi/rematch':
@@ -521,12 +530,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send({'error': 'Ошибка сервера. Подробности сохранены в локальном журнале.'}, 500)
 
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    """Prevent two Windows processes from sharing the application's listening port."""
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
     store.init()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    server = LocalHTTPServer(('127.0.0.1', args.port), Handler)
     (store.DATA / 'server.pid').write_text(str(os.getpid()), encoding='ascii')
     print(f'Land Recon: http://127.0.0.1:{args.port}', flush=True)
     server.serve_forever()

@@ -116,6 +116,39 @@ def test_new_area_cannot_use_unrelated_saved_survey(db):
     with pytest.raises(ValueError,match='другой области'):recon.run('trudovoe',{'bounds':[34.21,44.99,34.22,45.0],'refresh_nspd':False})
     assert store.get_setting('survey_trudovoe')['id']=='survey'
 
+
+def test_regional_lot_has_its_own_date_and_precedence_over_old_history():
+    values=fixture();number='90:12:1:2';g=box(34.207,44.995,34.208,44.996)
+    f=feature(g,'regional-geometry',number)
+    raw={'id':'21000000000000000001_1','subjectRFCode':'91','lotStatus':'APPLICATIONS_SUBMISSION',
+         'biddEndTime':'2099-01-01T00:00:00Z','characteristics':[{'code':'CadastralNumber','characteristicValue':number}]}
+    lot=torgi.normalize(raw)
+    values['torgi']={'id':'history','created_at':'2020-01-01T00:00:00Z','lots':[dict(lot,status='FAILED')]}
+    values['torgi_active']={'id':'regional','created_at':store.now(),'query_pages_received':True,'lots':[lot],
+        'geometries':{number:{'lookup':True,'features':[f],'received_at':'geometry-date','source':recon.nspd.INTERSECTS,'sha256':'geometry-hash'}}}
+    result=recon.build(values,recon.options({}))
+    auctions=[c for c in result['candidates'] if c['kind']=='auction']
+    assert len(auctions)==1
+    related=auctions[0]['lots'][0]
+    assert related['active_observed'] and related['regional_active'] and related['search_id']=='regional'
+    assert related['search_date']==values['torgi_active']['created_at'] and not related['documents_current']
+    assert result['sources']['torgi_active']['lots']==1 and result['source_inputs']['torgi_active']=='regional'
+
+
+def test_unlocated_lots_do_not_trigger_empty_geometry_overlay(monkeypatch):
+    from shapely.geometry.base import BaseGeometry
+    original=BaseGeometry.intersection
+    def intersection(self,other,*args,**kwargs):
+        if other.is_empty:raise RuntimeError('GEOS empty-overlay failure observed in real-area pilot')
+        return original(self,other,*args,**kwargs)
+    values=fixture()
+    lot=torgi.normalize({'id':'21000000000000000001_1','subjectRFCode':'91','lotStatus':'PUBLISHED'})
+    values['torgi_active']={'id':'regional','created_at':store.now(),'lots':[lot]}
+    monkeypatch.setattr(BaseGeometry,'intersection',intersection)
+    result=recon.build(values,recon.options({}))
+    assert result['summary']['drafts']>0 and not any(c['lots'] for c in result['candidates'])
+    assert result['sources']['torgi_active']['lots_without_number']==1
+
 def test_failed_refresh_preserves_previous_result_and_never_runs_torgi(db,monkeypatch):
     recon.run('trudovoe',{'bounds':BOUNDS,'refresh_nspd':False});old=store.get_setting('recon_trudovoe')
     monkeypatch.setattr(recon.survey,'run',lambda *a:(_ for _ in ()).throw(ValueError('HTTP 403')))

@@ -4,7 +4,7 @@ import json
 import math
 from shapely.geometry import box, shape, mapping
 from shapely.ops import unary_union
-from . import store, nspd
+from . import store, nspd, spatial_collection
 from .geometry import convert, polygons
 
 WARNING = 'Предварительный контур, не подтверждённый свободный участок. Полнота источников, права, дороги и допустимость использования не подтверждены. Полученные здания исключены; пересечения с зонами требуют проверки документов.'
@@ -103,6 +103,9 @@ def recalculate(project, params):
 
 def run(project, params):
     bounds = list(map(float, params.get('bounds', [])))
+    verify = params.get('verify_nspd', False)
+    if not isinstance(verify, bool):
+        raise ValueError('Параметр сверки кадастра должен быть логическим')
     filters = parameters(params)
     categories = nspd.catalog()
     nspd.spatial_body(bounds, categories['parcels']['categoryId'])
@@ -111,6 +114,11 @@ def run(project, params):
     layers = {}
     try:
         for mode in MODES:
+            if verify and mode in ('parcels', 'buildings'):
+                layers[mode] = spatial_collection.collect(bounds, categories[mode]['categoryId'])
+                attempt['completed_layers'].append(mode)
+                store.set_setting('survey_attempt_' + project, attempt)
+                continue
             body = nspd.spatial_body(bounds, categories[mode]['categoryId'])
             data, digest = nspd.request_json(nspd.INTERSECTS, body)
             fc = nspd.normalize(data)

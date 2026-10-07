@@ -30,6 +30,13 @@ def request(server, path, data=None, token=True):
     return urllib.request.urlopen(req, timeout=10)
 
 
+def test_application_server_rejects_second_listener_on_same_port():
+    first=app.LocalHTTPServer(('127.0.0.1',0),app.Handler)
+    try:
+        with pytest.raises(OSError):app.LocalHTTPServer(first.server_address,app.Handler)
+    finally:first.server_close()
+
+
 @pytest.mark.parametrize('request_kind,filename', [('rights-request','land-information-request.txt'),('planning-request','pzz-information-request.txt')])
 def test_enquiry_download_is_version_bound_unsent_and_never_mutates_registry(server,request_kind,filename):
     from test_recon import fixture, BOUNDS
@@ -458,6 +465,34 @@ def test_torgi_rematch_export_interruption_authorization_and_job(server,monkeypa
         time.sleep(.01)
     assert job['state']=='done' and job['result']=={'network_requests':0}
     assert calls==[('trudovoe',{'id':'search','survey_id':'survey'})]
+
+
+def test_regional_torgi_routes_keep_history_and_require_local_token(server,monkeypatch):
+    import time
+    store.set_setting('torgi_trudovoe',{'id':'history'})
+    store.set_setting('torgi_active_trudovoe',{'id':'regional','lots':[]})
+    store.set_setting('torgi_active_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/torgi/active/export') as response:
+        body=json.load(response)
+        assert body['result']['id']=='regional' and body['attempt']['state']=='interrupted'
+    calls=[]
+    for action in ('','/geometry','/rematch'):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            request(server,'/api/torgi/active'+action,{},token=False)
+        assert error.value.code==403
+    def operation(project,params,active=False):calls.append(active);return {'active':active}
+    for action,name in (('','run'),('/geometry','locate'),('/rematch','rematch')):
+        monkeypatch.setattr(app.torgi,name,operation)
+        with request(server,'/api/torgi/active'+action,{}) as response:job_id=json.load(response)['job_id']
+        for _ in range(30):
+            with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+            if job['state']!='running':break
+            time.sleep(.01)
+        assert job['state']=='done' and job['result']['active']
+    assert calls==[True,True,True] and store.get_setting('torgi_trudovoe')['id']=='history'
+    with request(server,'/nspd.html') as response:html=response.read()
+    assert b'recon-verify-nspd' in html and b'/torgi_active.js' in html
+    with request(server,'/torgi_active.js') as response:assert b'unknown' in response.read()
 
 
 def test_torgi_local_reprocess_export_queue_and_post_guard(server):

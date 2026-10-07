@@ -37,6 +37,57 @@ def test_structured_number_only_and_deadline():
     with pytest.raises(ValueError,match='регион'):torgi.normalize(wrong)
 
 
+def test_regional_active_query_has_no_address_filter_and_keeps_history(db,monkeypatch):
+    store.set_setting('torgi_trudovoe',{'id':'historic','lots':[]})
+    row=lot();row['lotStatus']='APPLICATIONS_SUBMISSION'
+    urls=[]
+    def fetch(url):urls.append(url);return page([row],0,1,True)
+    monkeypatch.setattr(torgi,'fetch',fetch)
+    torgi.run('trudovoe',{},active=True)
+    result=store.get_setting('torgi_active_trudovoe')
+    assert 'text=' not in urls[0] and 'lotStatus=PUBLISHED%2CAPPLICATIONS_SUBMISSION' in urls[0]
+    assert result['scope']=='regional_active' and not result['history'] and result['query_pages_received']
+    assert result['lots'][0]['spatial_state']=='unknown' and not result['complete']
+    assert store.get_setting('torgi_trudovoe')['id']=='historic'
+
+
+def test_regional_wrong_status_does_not_replace_previous(db,monkeypatch):
+    old={'id':'regional'};store.set_setting('torgi_active_trudovoe',old)
+    monkeypatch.setattr(torgi,'fetch',lambda url:page([lot()],0,1,True))
+    with pytest.raises(ValueError,match='статус'):torgi.run('trudovoe',{},active=True)
+    assert store.get_setting('torgi_active_trudovoe')==old
+
+
+def test_missing_geometry_is_not_outside_even_with_known_outside_number():
+    s=pilot();a=torgi.normalize(lot());a['cadastral_numbers'].append('90:12:1:2')
+    outside=copy.deepcopy(s['layers']['parcels']['geojson']['features'][0]);outside['geometry']=mapping(box(35,45,35.01,45.01))
+    observations={a['cadastral_numbers'][0]:{'features':[outside]}}
+    result=torgi.relate([a],observations,s)[0]
+    assert not result['in_survey'] and result['spatial_state']=='unknown'
+    a['cadastral_numbers'].pop()
+    assert torgi.relate([a],observations,s)[0]['spatial_state']=='outside'
+
+
+def test_regional_geometry_prioritizes_district_without_claiming_other_numbers_outside(db,monkeypatch):
+    s=pilot();store.set_setting('survey_trudovoe',s)
+    row=torgi.normalize(lot(cad='90:14:1:2'))
+    store.set_setting('torgi_active_trudovoe',{'id':'regional','lots':[row]})
+    monkeypatch.setattr(nspd:=torgi.nspd,'request_json',lambda *a:pytest.fail('Other district lookup should be deferred'))
+    torgi.locate('trudovoe',{'id':'regional'},active=True)
+    result=store.get_setting('torgi_active_trudovoe')
+    assert result['geometry_deferred_numbers']==['90:14:1:2']
+    assert result['lots'][0]['spatial_state']=='unknown'
+
+
+def test_survey_signature_tracks_geometry_and_source_dates_but_not_recalculation_id():
+    original=pilot();revision=copy.deepcopy(original);revision['id']='recalculated'
+    assert torgi.survey_signature(original)==torgi.survey_signature(revision)
+    revision['layers']['parcels']['received_at']='new observation'
+    assert torgi.survey_signature(original)!=torgi.survey_signature(revision)
+    revision=copy.deepcopy(original);revision['gaps']['features']=[]
+    assert torgi.survey_signature(original)!=torgi.survey_signature(revision)
+
+
 def test_all_pages_not_whole_territory(db,monkeypatch):
     store.set_setting('torgi_geometry_attempt_trudovoe',{'state':'done','previous':True})
     first=[lot(f'210000000000000000{i:02}_1') for i in range(10)]
