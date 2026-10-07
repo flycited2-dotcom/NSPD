@@ -21,7 +21,7 @@ from land.exports import bundle, dossier
 from land import nspd
 from land import survey
 from land import publications
-from land import planning_watch, planning_maps, planning_boundary, planning_archive
+from land import planning_watch, planning_maps, planning_boundary, planning_archive, planning_regulations
 from land import torgi
 from land import municipal, land_status
 from land import municipal_local
@@ -223,6 +223,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({'result': result}, filename='official-publications-check.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/planning', '/api/planning/export'):
                 return self.send(planning_watch.report(project), filename='district-document-versions.json' if p.path.endswith('/export') else None)
+            if p.path == '/api/planning/regulations/pdf':
+                raw = planning_regulations.cached_pdf(project, query.get('version', [''])[0], query.get('document', [''])[0])
+                return self.send(raw, content_type='application/pdf')
+            if p.path in ('/api/planning/regulations', '/api/planning/regulations/search', '/api/planning/regulations/report'):
+                version = query.get('version', [None])[0]
+                if p.path == '/api/planning/regulations':
+                    return self.send(planning_regulations.report(project, version))
+                zone, text, offset = query.get('zone', [''])[0], query.get('q', [''])[0], int(query.get('offset', ['0'])[0])
+                if p.path.endswith('/report'):
+                    return self.send(planning_regulations.html_report(project, zone, text, offset, version), content_type='text/html; charset=utf-8')
+                return self.send(planning_regulations.search(project, zone, text, offset, version))
             if p.path in ('/api/planning/archive', '/api/planning/archive/export'):
                 return self.send(planning_archive.report(project), filename='district-pzz-archive.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/planning/boundary', '/api/planning/boundary/export'):
@@ -383,6 +394,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Версии и реквизиты PDF района', lambda: planning_watch.read(project, data)))
             if path == '/api/planning/reprocess':
                 return self.send(launch_job(project, 'Локальное перечтение PDF района', lambda: planning_watch.reprocess(project, data)))
+            if path == '/api/planning/regulations/read':
+                return self.send(launch_job(project, 'Поиск по полному тексту сохранённых ПЗЗ', lambda: planning_regulations.read(project, data)))
             if path == '/api/planning/maps':
                 return self.send(launch_job(project, 'Карты приложений ПЗЗ', lambda: planning_maps.run(project, data)))
             if path == '/api/planning/maps/render':

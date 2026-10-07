@@ -96,6 +96,34 @@ def test_recon_page_serves_new_workflow(server):
     with request(server,'/recon.js') as response:assert b'/api/recon/watch' in response.read()
 
 
+def test_pzz_full_text_routes_and_token_protection(server, monkeypatch):
+    import time
+    with request(server, '/api/planning/regulations') as response:
+        assert json.load(response)['counts']['processed_pages'] == 0
+    with request(server, '/api/planning/regulations/report') as response:
+        assert response.headers['Content-Type'].startswith('text/html')
+    monkeypatch.setattr(app.planning_regulations, 'cached_pdf', lambda project, version, document: b'%PDF-exact-observation')
+    with request(server, '/api/planning/regulations/pdf?version=version&document=doc') as response:
+        assert response.headers['Content-Type'] == 'application/pdf'
+        assert response.read() == b'%PDF-exact-observation'
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        request(server, '/api/planning/regulations/read', {}, token=False)
+    assert exc.value.code == 403
+    monkeypatch.setattr(app.planning_regulations, 'read', lambda project, params: {'processed_pages': 40})
+    with request(server, '/api/planning/regulations/read', {}) as response:
+        job_id = json.load(response)['job_id']
+    for _ in range(30):
+        with request(server, '/api/jobs/' + job_id) as response:
+            job = json.load(response)
+        if job['state'] != 'running': break
+        time.sleep(.01)
+    assert job['state'] == 'done' and job['result']['processed_pages'] == 40
+    with request(server, '/nspd.html') as response:
+        assert b'id="regulations-read"' in response.read()
+    with request(server, '/planning_regulations.js') as response:
+        assert b'/api/planning/regulations/read' in response.read()
+
+
 def test_shared_basemap_asset_load_order_and_default_opt_in(server):
     from html.parser import HTMLParser
     class Page(HTMLParser):

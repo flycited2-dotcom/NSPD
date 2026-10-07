@@ -33,7 +33,7 @@ async function runDistrict(action,scope='all'){
   const payload=action==='catalog'?{}:{id:districtReport?.id,retry:el('district-retry').checked,scope};
   const job=await api('/api/planning/'+action,payload);let state;
   do{await new Promise(r=>setTimeout(r,1000));state=await api('/api/jobs/'+job.job_id)}while(state.state==='running');
-  await refreshDistrict();if(typeof refreshPzzMaps==='function')await refreshPzzMaps();if(state.state==='error')throw Error(state.error);
+  await refreshDistrict();if(typeof refreshPzzMaps==='function')await refreshPzzMaps();if(typeof refreshRegulations==='function')await refreshRegulations();if(state.state==='error')throw Error(state.error);
  }catch(e){el('district-status').textContent+=' Не выполнено: '+e.message}
  finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);el('district-read').disabled=!districtReport;el('district-read-pzz').disabled=!districtReport;el('district-reprocess').disabled=!districtCanReprocess()}
 }

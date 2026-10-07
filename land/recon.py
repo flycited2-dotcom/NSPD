@@ -10,12 +10,12 @@ from urllib.parse import urlparse
 from shapely.affinity import rotate
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status
+from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations
 from .geometry import convert, polygons
 from .review import CHECKS
 
-VERSION=6
-KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary')
+VERSION=7
+KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
 HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru'}
@@ -152,6 +152,8 @@ def history_documents(values):
 
 
 def build(values,params):
+    if values.get('planning_regulations'):
+        planning_regulations.checked(values['planning_regulations'])
     s=values['survey'];metric=metric_for(s['bounds']);boundary=box(*s['bounds'])
     context=values.get('nspd_context');entries=nspd_context.projected(context,s['bounds'],metric)
     historical=values.get('planning_boundary');historical_geometries=planning_boundary.projected(historical,metric)
@@ -239,6 +241,12 @@ def build(values,params):
                          'archive_source_id':(values.get('planning_watch') or {}).get('archive_source_id'),
                          'archive_counts':copy.deepcopy((values.get('planning_watch') or {}).get('archive_counts')),
                          'geometry_confirmed':False,'complete':False},
+             'regulations':{'id':(values.get('planning_regulations') or {}).get('id'),
+                            'planning_id':(values.get('planning_regulations') or {}).get('planning_id'),
+                            'updated_at':(values.get('planning_regulations') or {}).get('updated_at'),
+                            'counts':planning_regulations.counts(values.get('planning_regulations')),
+                            'catalog_matches':bool(values.get('planning_regulations') and values['planning_regulations']['planning_id']==(values.get('planning_watch') or {}).get('id')),
+                            'legal_status_confirmed':False,'candidate_zone_confirmed':False},
              'historical_boundary':{'id':(historical or {}).get('id'),'applied':bool(historical_geometries),
                                     'source':copy.deepcopy((historical or {}).get('source')),'limitation':planning_boundary.LIMITATION,
                                     'current_boundary_confirmed':False,'crs_confirmed':False,
@@ -387,6 +395,7 @@ def html_report(data,candidate_id=None):
                       +'<p>До полученного кадастрового контура дорожного назначения: '+esc((c.get('road_proximity') or {}).get('distance_m'))+' м. Расстояние не подтверждает законный подъезд.</p>'
                       +'<h3>Особенности</h3><ul>'+''.join('<li>'+esc(f)+'</li>' for f in c['flags'])+'</ul><h3>Полученные совпадения</h3><ul>'+(''.join(evidence) or '<li>Совпадения не установлены. Это не подтверждение отсутствия процедур или ограничений.</li>')+'</ul>'
                       +'<h3>Ближайшие полученные участки</h3><ul>'+''.join('<li>'+esc(n['fields'].get('cad_num',n['id']))+' · '+esc(n['distance_m'])+' м · '+esc(json.dumps(n['fields'],ensure_ascii=False))+'</li>' for n in c['neighbours'])+'</ul>'
+                      +planning_regulations.dossier_section(result)
                       +land_status.dossier_section(result,c,data.get('stale',False))
                       +'<h3>Недостающие проверки</h3><ul>'+''.join('<li>'+esc(x)+'</li>' for x in c['required_checks'])+'</ul><h3>Контур WGS84</h3><pre>'+esc(json.dumps(c['geometry'],ensure_ascii=False))+'</pre></section>')
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}@media print{section{break-before:page}}</style>'
