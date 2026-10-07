@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 import re
-from . import store, torgi_docs, ocr, image_evidence
+from . import store, torgi, torgi_docs, ocr, image_evidence
 
 BATCH = 6
 
@@ -67,25 +67,29 @@ def read_unit(file, number):
     return observation
 
 
-def run(project, params):
-    old = store.get_setting('torgi_documents_' + project)
-    search = store.get_setting('torgi_' + project)
+def run(project, params, active=False):
+    old = store.get_setting(torgi_docs.setting_key(project, active))
+    search = store.get_setting(torgi.setting_key(project, active))
     if not old or params.get('id') != old['id'] or not torgi_docs.same_search(search,old):
         raise ValueError('Каталог/поиск изменился; обновите страницу')
     retry = params.get('retry_errors', False)
     if not isinstance(retry, bool):
         raise ValueError('Параметр повтора должен быть логическим')
     result = copy.deepcopy(old)
+    catalog_id = old['id']
     selected = queue(result, retry)[:BATCH]
     attempt = {'state': 'running', 'started_at': store.now(), 'processed': 0, 'requested': len(selected), 'network_requests': 0}
-    store.set_setting('torgi_visual_attempt_' + project, attempt)
+    attempt_key = torgi.setting_key(project, active, '_visual_attempt')
+    store.set_setting(attempt_key, attempt)
     try:
+        torgi_docs.assert_current(project, search, catalog_id, active)
         info = ocr.worker(['--probe'], 15) if selected else old.get('visual_engine', {})
         result['visual_engine'] = info
         for file, number in selected:
+            torgi_docs.assert_current(project, search, catalog_id, active)
             source_path(file)  # a changed source stops the job, preserving prior observations
             attempt.update(file_key=file['key'], page=number)
-            store.set_setting('torgi_visual_attempt_' + project, attempt)
+            store.set_setting(attempt_key, attempt)
             prior = file.get('visual_ocr') or {}
             if prior.get('source_sha256') != file['sha256']:
                 prior = {'source_sha256': file['sha256'], 'pages': [], 'verification_required': True}
@@ -96,9 +100,9 @@ def run(project, params):
             prior['pages'] = sorted([p for p in prior['pages'] if p['page'] != number] + [observation], key=lambda p: p['page'])
             file['visual_ocr'] = prior
             attempt['processed'] += 1
-            torgi_docs.persist(project, result)
-            store.set_setting('torgi_visual_attempt_' + project, attempt)
-        torgi_docs.persist(project, result)
+            catalog_id = torgi_docs.persist_current(project, result, search, catalog_id, active)
+            store.set_setting(attempt_key, attempt)
+        catalog_id = torgi_docs.persist_current(project, result, search, catalog_id, active)
         attempt.update(state='done', finished_at=store.now(), remaining=len(queue(result)))
         with store.connect() as db:
             store.event(db, project, 'torgi_visual_ocr', {'id': result['id'], 'units': attempt['processed'], 'network_requests': 0})
@@ -107,11 +111,13 @@ def run(project, params):
         attempt.update(state='error', error=str(exc)[:500], finished_at=store.now())
         raise
     finally:
-        store.set_setting('torgi_visual_attempt_' + project, attempt)
+        store.set_setting(attempt_key, attempt)
 
 
-def preview(project, key, number=None, view=None):
-    result = store.get_setting('torgi_documents_' + project, {}) or {}
+def preview(project, key, number=None, view=None, active=False):
+    result = store.get_setting(torgi_docs.setting_key(project, active), {}) or {}
+    if active and not torgi_docs.same_search(store.get_setting(torgi.setting_key(project, active)), result):
+        raise ValueError('Каталог относится к другому поиску; обновите карточки')
     file = result.get('files', {}).get(key)
     if not file or file['state'] != 'read':
         raise ValueError('Файл не принадлежит текущему каталогу')

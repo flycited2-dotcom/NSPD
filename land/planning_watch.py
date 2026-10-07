@@ -22,9 +22,11 @@ SOURCES = (
     {'id': 'administration2026', 'url': 'https://simfmo-rk.ru/postanovleniya-administratsii-2026-god/'},
     {'id': 'planning', 'url': 'https://simfmo-rk.ru/dokumentatsiya-po-planirovke-territorii/'},
     {'id': 'pzz2026', 'url': 'https://simfmo-rk.ru/2026-2/'},
+    {'id': 'council2026', 'url': 'https://simfmo-rk.ru/resheniya-rajonnogo-soveta-iii-sozyva/'},
 )
-LIMITATION = ('Проверяются только четыре указанных перечня района: проекты «Коммунальник»/СНТ «Труд» '
-              'и ссылки ПЗЗ Трудовского поселения в разделе 2026 года. '
+LIMITATION = ('Проверяются пять указанных перечней района: проекты «Коммунальник»/СНТ «Труд», '
+              'ссылки ПЗЗ Трудовского поселения в специальном разделе и в общих решениях III созыва за 2026 год. '
+              'Не более 16 наблюдённых сессий на каждый из двух перечней; очередь не усекается частично. '
               'Дополнительно подключаются датированные ссылки из сохранённых проверок перечней ГП/ПЗЗ и архива II созыва, если они выполнены. '
               'Это не полная история, не сводная действующая редакция и не проверка прав. Реквизиты и связи извлечены из текста; '
               'подлинность, вступление в силу и применимость к контуру требуют сверки. '
@@ -196,14 +198,22 @@ def catalog(project):
               'complete': False, 'geometry_confirmed': False, 'legal_status_confirmed': False, 'limitation': LIMITATION,
               'previous_report_id': old.get('id')}
     found = {}
+    access_blocked = False
 
     def receive(source, pzz=False, sessions=False):
+        nonlocal access_blocked
         record = dict(source, checked_at=store.now(), state='error')
         result['sources'].append(record)
         try:
+            if access_blocked:
+                raise ValueError('Доступ к источнику ограничен; дальнейшие запросы в этой проверке не выполнялись')
             raw, ct, code = fetch(source['url'], max_bytes=4 * 1024 * 1024)
             if 'text/html' not in ct.lower():
                 raise ValueError('Перечень не вернул HTML')
+            if re.search(r'<title\b[^>]*>[^<]*(?:ddos|captcha|access\s+denied|доступ\s+ограничен)',
+                         raw.decode('utf-8-sig', errors='strict'), re.I):
+                access_blocked = True
+                raise ValueError('Источник вернул страницу защиты; дальнейшие запросы не выполнялись')
             links = parse_links(raw, source['url'])
             sha = hashlib.sha256(raw).hexdigest()
             folder = store.DATA / 'planning_watch'
@@ -216,19 +226,29 @@ def catalog(project):
                 if len(selected) > MAX_SESSIONS:
                     raise ValueError('Число сессий превышает лимит; перечень не обходился частично')
                 for entry in selected:
-                    receive({'id': 'session_' + digest(entry['url'])[:12], 'url': entry['url'], 'parent_url': source['url']}, pzz=True)
+                    receive({'id': 'session_' + digest(entry['url'])[:12], 'url': entry['url'],
+                             'parent_url': source['url'], 'session_title': entry['title'],
+                             'session_publication_date': entry['publication_date'],
+                             'root_listing_sha256': sha, 'root_listed_at': record['checked_at']}, pzz=True)
             else:
                 for entry in selected:
                     ref = dict(entry, parent_url=source['url'], root_url=source.get('parent_url', source['url']), listing_sha256=sha, listed_at=record['checked_at'])
+                    if pzz:
+                        ref['planning_kind'] = 'pzz'
+                    for key in ('root_listing_sha256', 'root_listed_at', 'session_title', 'session_publication_date'):
+                        if key in source:
+                            ref[key] = source[key]
                     found.setdefault(entry['url'], []).append(ref)
         except Exception as exc:
+            if re.search(r'\bHTTP\s+(?:401|403|429)\b', str(exc)):
+                access_blocked = True
             record.update(state='error', error=str(exc)[:500])
             previous = next((x for x in old.get('sources', []) if x['url'] == source['url']), None)
             if previous:
                 record['previous_observation'] = {k: previous[k] for k in ('checked_at', 'state', 'sha256') if k in previous}
 
     for source in SOURCES:
-        receive(source, sessions=source['id'] == 'pzz2026')
+        receive(source, sessions=source['id'] in ('pzz2026', 'council2026'))
     result['history_source_id'] = history_id
     result['sources'].extend(history_sources)
     result['archive_source_id'] = archive_id
@@ -392,11 +412,14 @@ def read(project, params):
     result = copy.deepcopy(old)
     result['previous_report_id'] = old['id']
     available = [r for r in result['items'] if r['currently_listed'] and (scope=='all' or is_pzz(r)) and (r.get('read_revision') != result['catalog_revision'] or (retry and r.get('read_attempt', {}).get('state') == 'error'))]
-    selected = sorted(available, key=lambda r: r.get('read_revision') == result['catalog_revision'])[:BATCH]
+    selected = sorted(available, key=lambda r: (r.get('state') == 'read',
+                                              r.get('read_revision') == result['catalog_revision']))[:BATCH]
     if not selected:
         return {'processed': 0, 'remaining': 0}
+    processed = []
     for row in selected:
         attempt = {'checked_at': store.now(), 'state': 'error'}
+        access_blocked = False
         try:
             if not safe_link(row['url'], row['url']) or not row['url'].lower().endswith('.pdf'):
                 raise ValueError('Ссылка PDF не принадлежит официальному перечню')
@@ -418,10 +441,14 @@ def read(project, params):
             attempt.update(state='received', sha256=sha)
         except Exception as exc:
             attempt['error'] = str(exc)[:500]
+            access_blocked = bool(re.search(r'\bHTTP\s+(?:401|403|429)\b', str(exc)))
             if row['state'] != 'read':
                 row['state'] = 'error'
         row['read_attempt'] = attempt
         row['read_revision'] = result['catalog_revision']
+        processed.append(row)
+        if access_blocked:
+            break
     # Do not replace a catalog refreshed by another process while downloads were running.
     with store.LOCK:
         current = store.get_setting('planning_watch_' + project)
@@ -429,8 +456,8 @@ def read(project, params):
             raise ValueError('Каталог района изменился во время чтения; прежний результат не заменён')
         save(project, result)
         with store.connect() as db:
-            store.event(db, project, 'planning_read', {'id': result['id'], 'processed': len(selected), 'errors': sum(r['read_attempt']['state'] == 'error' for r in selected)})
-    return {'processed': len(selected), 'remaining': sum(r.get('read_revision') != result['catalog_revision'] and r['currently_listed'] and (scope=='all' or is_pzz(r)) for r in result['items'])}
+            store.event(db, project, 'planning_read', {'id': result['id'], 'processed': len(processed), 'errors': sum(r['read_attempt']['state'] == 'error' for r in processed)})
+    return {'processed': len(processed), 'remaining': sum(r.get('read_revision') != result['catalog_revision'] and r['currently_listed'] and (scope=='all' or is_pzz(r)) for r in result['items'])}
 
 
 def needs_reprocess(row, scope='all', retry=False):

@@ -91,6 +91,26 @@ def test_document_number_context_is_not_zone_or_rights_confirmation():
     assert len(contexts)==1 and contexts[0]['url']=='' and 'не установлена' in contexts[0]['scope']
     assert recon.safe_url('https://torgi.gov.ru:bad/path')==''
 
+
+def test_regional_debt_sale_is_evidence_but_never_land_provision_candidate():
+    values=fixture();number='90:12:1:2';g=box(34.207,44.995,34.208,44.996)
+    raw={'id':'21000000000000000001_1','subjectRFCode':'91','lotStatus':'APPLICATIONS_SUBMISSION',
+         'biddType':{'code':'229FZ','name':'Реализация имущества должников'},
+         'biddEndTime':'2099-01-01T00:00:00Z','characteristics':[{'code':'CadastralNumber','characteristicValue':number}]}
+    source={'id':'regional','created_at':store.now(),'lots':[torgi.normalize(raw)],
+            'geometries':{number:{'lookup':True,'features':[feature(g,'debt',number)],'source':recon.nspd.INTERSECTS}}}
+    values['torgi_active']=source
+    result=recon.build(values,recon.options({}))
+    assert not any(c['kind']=='auction' for c in result['candidates'])
+    assert result['sources']['torgi_active']['groups']['debt_sale']==1
+    source['lots'][0]['type']['code']='ZK'
+    result=recon.build(values,recon.options({}))
+    auction=next(c for c in result['candidates'] if c['kind']=='auction')
+    assert not auction['rights_confirmed'] and not auction['lots'][0]['documents_current']
+    values['torgi_active_documents']={'id':'docs','search_id':'regional','search_created_at':source['created_at'],'cards':[{'lot_id':source['lots'][0]['id'],'state':'received'}]}
+    result=recon.build(values,recon.options({}))
+    assert next(c for c in result['candidates'] if c['kind']=='auction')['lots'][0]['documents_current']
+
 def test_local_workflow_never_downloads_and_preserves_source_dates(db,monkeypatch):
     monkeypatch.setattr(recon.nspd,'request_json',lambda *a:pytest.fail('unexpected NSPD request'))
     monkeypatch.setattr(recon.torgi,'run',lambda *a:pytest.fail('unexpected Torgi request'))
@@ -121,6 +141,7 @@ def test_regional_lot_has_its_own_date_and_precedence_over_old_history():
     values=fixture();number='90:12:1:2';g=box(34.207,44.995,34.208,44.996)
     f=feature(g,'regional-geometry',number)
     raw={'id':'21000000000000000001_1','subjectRFCode':'91','lotStatus':'APPLICATIONS_SUBMISSION',
+         'biddType':{'code':'ZK','name':'Аренда и продажа земельных участков'},
          'biddEndTime':'2099-01-01T00:00:00Z','characteristics':[{'code':'CadastralNumber','characteristicValue':number}]}
     lot=torgi.normalize(raw)
     values['torgi']={'id':'history','created_at':'2020-01-01T00:00:00Z','lots':[dict(lot,status='FAILED')]}

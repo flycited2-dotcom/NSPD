@@ -495,6 +495,43 @@ def test_regional_torgi_routes_keep_history_and_require_local_token(server,monke
     with request(server,'/torgi_active.js') as response:assert b'unknown' in response.read()
 
 
+def test_regional_document_http_routes_are_isolated_and_protected(server,monkeypatch):
+    import time
+    store.set_setting('torgi_trudovoe',{'id':'old','lots':[]})
+    store.set_setting('torgi_documents_trudovoe',{'id':'historical','files':{}})
+    store.set_setting('torgi_active_trudovoe',{'id':'new','created_at':'date','lots':[]})
+    store.set_setting('torgi_active_documents_trudovoe',{'id':'regional','search_id':'new','cards':[],'files':{}})
+    with request(server,'/api/torgi/active/documents/export') as response:
+        body=json.load(response)
+        assert body['result']['id']=='regional' and not body['search_stale']
+    calls=[]
+    def operation(project,params,active=False):calls.append(active);return {'regional':active}
+    for action,owner,name in (('',app.torgi_docs,'metadata'),('/read',app.torgi_docs,'read'),('/reprocess',app.torgi_docs,'reprocess'),('/ocr',app.torgi_visual,'run')):
+        path='/api/torgi/active/documents'+action
+        with pytest.raises(urllib.error.HTTPError) as error:request(server,path,{},token=False)
+        assert error.value.code==403
+        monkeypatch.setattr(owner,name,operation)
+        with request(server,path,{}) as response:job_id=json.load(response)['job_id']
+        for _ in range(30):
+            with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+            if job['state']!='running':break
+            time.sleep(.01)
+        assert job['state']=='done' and job['result']['regional']
+    assert calls==[True]*4
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/torgi/active/documents/collect',{},token=False)
+    assert error.value.code==403
+    monkeypatch.setattr(app.regional_documents,'collect',lambda p,v:{'regional':True})
+    with request(server,'/api/torgi/active/documents/collect',{}) as response:job_id=json.load(response)['job_id']
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done'
+    assert store.get_setting('torgi_documents_trudovoe')['id']=='historical'
+    with request(server,'/nspd.html') as response:html=response.read()
+    assert b'/torgi_active_documents.js' in html and b'torgi-active-group' in html
+
+
 def test_torgi_local_reprocess_export_queue_and_post_guard(server):
     store.set_setting('torgi_trudovoe',{'id':'search','created_at':'date','lots':[]})
     store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','search_created_at':'date','cards':[],

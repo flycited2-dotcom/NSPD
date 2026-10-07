@@ -40,7 +40,7 @@ def main():
             time.sleep(.2)
         else:
             raise RuntimeError('Нет ответа приложения. Проверьте data/server-errors.log.')
-    webbrowser.open(URL)
+    webbrowser.open(URL + '/nspd.html')
 
 
 if __name__ == '__main__':

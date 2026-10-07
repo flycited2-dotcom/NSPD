@@ -13,9 +13,10 @@ from shapely.ops import unary_union
 from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations, planning_enquiry
 from .geometry import convert, polygons
 from .review import CHECKS
+from . import regional_documents
 
-VERSION=8
-KEYS=('survey','torgi','torgi_active','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations')
+VERSION=9
+KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
 HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru'}
@@ -26,13 +27,14 @@ def options(params):
     result.update(purpose=params.get('purpose','unspecified'),target_area=float(params.get('target_area',1000)),
                   limit=params.get('limit',10),refresh_nspd=params.get('refresh_nspd',True),
                   verify_nspd=params.get('verify_nspd',True),refresh_active_torgi=params.get('refresh_active_torgi',False),
+                  refresh_active_documents=params.get('refresh_active_documents',False),
                   refresh_torgi=params.get('refresh_torgi',False),avoid_restrictions=params.get('avoid_restrictions',True),avoid_planned=params.get('avoid_planned',True),avoid_environment=params.get('avoid_environment',True),query=str(params.get('query','Трудовое')).strip())
     if result['purpose'] not in PURPOSES:raise ValueError('Неизвестная цель использования')
     if not math.isfinite(result['target_area']) or not result['min_area']<=result['target_area']<=result['max_area']:
         raise ValueError('Площадь пробного контура должна находиться между минимальной и максимальной')
     if math.sqrt(result['target_area'])<result['min_width']:raise ValueError('Выбранная площадь меньше квадрата заданной ширины')
     if isinstance(result['limit'],bool) or not isinstance(result['limit'],int) or not 1<=result['limit']<=20:raise ValueError('Допустимо от 1 до 20 контуров')
-    if any(not isinstance(result[k],bool) for k in ('refresh_nspd','verify_nspd','refresh_torgi','refresh_active_torgi','avoid_restrictions','avoid_planned','avoid_environment')):raise ValueError('Параметры обновления и исключения должны быть логическими')
+    if any(not isinstance(result[k],bool) for k in ('refresh_nspd','verify_nspd','refresh_torgi','refresh_active_torgi','refresh_active_documents','avoid_restrictions','avoid_planned','avoid_environment')):raise ValueError('Параметры обновления и исключения должны быть логическими')
     if not 2<=len(result['query'])<=120 or any(ord(c)<32 for c in result['query']):raise ValueError('Некорректный текст поиска торгов')
     return result
 
@@ -173,7 +175,9 @@ def build(values,params):
         for original in (snapshot or {}).get('lots',[]):
             item=copy.deepcopy(original)
             item.update(search_date=snapshot.get('created_at'),search_id=snapshot.get('id'),regional_active=regional,
-                        documents_current=not regional and torgi_docs.same_search(source,values.get('torgi_documents')))
+                        documents_current=torgi_docs.same_search(snapshot,values.get('torgi_active_documents' if regional else 'torgi_documents')))
+            if regional:
+                item['documents_current']=item['documents_current'] and any(c.get('lot_id')==item['id'] and c.get('state')=='received' for c in (values.get('torgi_active_documents') or {}).get('cards',[]))
             indexed_lots[item['id']]=item
     geometry_source={'geometries':{**(source or {}).get('geometries',{}),**(active_source or {}).get('geometries',{})}}
     observations=torgi.combined_geometries(geometry_source,s,list(indexed_lots.values()))
@@ -183,7 +187,7 @@ def build(values,params):
         source_age=age_days(lot.get('search_date'))
         active=lot.get('status') in ('PUBLISHED','APPLICATIONS_SUBMISSION') and not lot.get('stopped') and not lot.get('annulled') and torgi.deadline_state(lot,store.now())=='future' and source_age is not None and 0<=source_age<=1
         lot['active_observed']=active
-        if active:
+        if active and (not lot.get('regional_active') or torgi.land_group(lot)=='land_provision'):
             for match in lot['spatial_matches']:
                 number=match['cadastral_number']
                 if number not in by_number:
@@ -219,6 +223,7 @@ def build(values,params):
             if overlap>.01:related.append({'id':lot['id'],'url':safe_url(lot['url']),'status':lot['status'],'deadline':lot.get('deadline'),
                                           'active_observed':lot['active_observed'],'overlap_m2':round(overlap,2),'search_date':lot.get('search_date'),
                                           'search_id':lot.get('search_id'),'regional_active':lot.get('regional_active',False),
+                                          'land_group':torgi.land_group(lot),'type':copy.deepcopy(lot.get('type',{})),
                                           'geometry_sources':[{'cadastral_number':m['cadastral_number'],**{key:observations[m['cadastral_number']].get(key) for key in ('source','received_at','sha256')}} for m in used],
                                           'documents_current':lot['documents_current']})
         numbers={row.get('cadastral_number')} | {torgi.canonical(n['fields'].get('cad_num')) for n in neighbours if n['distance_m']<=10}
@@ -233,6 +238,7 @@ def build(values,params):
         if matches['restrictions']:flags.append('Есть пересечение с полученными ЗОУИТ; нужен режим ограничения')
         if not matches['pzz']:flags.append('Территориальная зона для контура не установлена')
         if related:flags.append('Есть опубликованные процедуры; проверить статусы и схемы лотов')
+        if any(lot.get('land_group')=='debt_sale' for lot in related):flags.append('Есть реализация имущества должника; это не подтверждает предоставление свободной земли')
         if g.area>params['max_area']:flags.append('Требуется проектирование меньшего контура')
         if world.distance(boundary.boundary)<1e-8:flags.append('Контур примыкает к границе обследования')
         digest=hashlib.sha256((row['kind']+world.normalize().wkb.hex()).encode()).hexdigest()[:20]
@@ -251,6 +257,9 @@ def build(values,params):
                       'complete':False,'documents_current':torgi_docs.same_search(source,values.get('torgi_documents'))},
              'torgi_active':{'id':(active_source or {}).get('id'),'received_at':(active_source or {}).get('created_at'),
                              'lots':len((active_source or {}).get('lots',[])),
+                             'groups':{group:sum(torgi.land_group(lot)==group for lot in (active_source or {}).get('lots',[])) for group in ('land_provision','debt_sale','other')},
+                             'documents_id':(values.get('torgi_active_documents') or {}).get('id'),
+                             'documents_current':torgi_docs.same_search(active_source,values.get('torgi_active_documents')),
                              'query_pages_received':bool((active_source or {}).get('query_pages_received')),
                              'unlocated_numbers':sorted(n for n in active_numbers if not observations.get(n,{}).get('features')),
                              'lots_without_number':sum(not lot['cadastral_numbers'] for lot in (active_source or {}).get('lots',[])),
@@ -329,6 +338,14 @@ def run(project,params):
             attempt['step']='Земельные публикации по всему Крыму';store.set_setting('recon_attempt_'+project,attempt)
             try:torgi.run(project,{},active=True)
             except Exception as exc:attempt['warnings'].append('Региональные публикации не обновлены; прежняя выборка сохранена: '+str(exc)[:300])
+        if settings['refresh_active_documents']:
+            attempt['step']='Карточки и документы земельных лотов';store.set_setting('recon_attempt_'+project,attempt)
+            active_search=store.get_setting('torgi_active_'+project) or {}
+            try:
+                documents=regional_documents.collect(project,{'search_id':active_search.get('id')})
+                if documents['state']!='done' or documents['cards_remaining'] or documents['files_remaining']:
+                    attempt['warnings'].append('Документы земельных лотов получены частично; оставшаяся очередь и ошибки показаны отдельно')
+            except Exception as exc:attempt['warnings'].append('Документы земельных лотов не завершены; прежние датированные источники сохранены: '+str(exc)[:300])
         attempt['step']='Подбор контуров и сверка источников';store.set_setting('recon_attempt_'+project,attempt)
         values=inputs(project);result=build(values,settings)
         result.update(previous_result_id=(old or {}).get('id'),operation_warnings=attempt['warnings'])

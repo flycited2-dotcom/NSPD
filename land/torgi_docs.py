@@ -22,6 +22,26 @@ READ_FORMATS = ('pdf','docx','doc','rtf',*image_evidence.FORMATS)
 ALGORITHM = 'torgi-file-text-v2'
 
 
+def setting_key(project, active=False, suffix=''):
+    return torgi.setting_key(project, active, '_documents' + suffix)
+
+
+def assert_current(project, search, catalog_id, active=False):
+    current = store.get_setting(torgi.setting_key(project, active))
+    catalog = store.get_setting(setting_key(project, active))
+    if ((current or {}).get('id') != (search or {}).get('id')
+            or torgi.source_id(current) != torgi.source_id(search)
+            or (catalog or {}).get('id') != catalog_id):
+        raise ValueError('Поиск или каталог изменились во время обработки; результат не записан')
+
+
+def persist_current(project, result, search, catalog_id, active=False):
+    with store.LOCK:
+        assert_current(project, search, catalog_id, active)
+        persist(project, result, active)
+    return result['id']
+
+
 def same_search(search,catalog):
     if not search or not catalog:return False
     if search.get('search_source_id'):
@@ -105,9 +125,15 @@ def files_for(cards, prior):
     return files
 
 
-def metadata_queue(search,result,retry=False):
+def metadata_queue(search,result,retry=False,active=False,survey=None):
     prior={c['lot_id']:c for c in result.get('cards',[])}
-    return [lot for lot in search['lots'] if lot['id'] not in prior or (retry and prior[lot['id']]['state']=='error')]
+    pending=[lot for lot in search['lots'] if (not active or (lot.get('type') or {}).get('code')=='ZK')
+             and (lot['id'] not in prior or (retry and prior[lot['id']]['state']=='error'))]
+    if active:
+        districts={':'.join(number.split(':')[:2]) for number in torgi.survey_geometries(survey)}
+        pending.sort(key=lambda lot: 0 if any(':'.join(number.split(':')[:2]) in districts
+                     for number in lot.get('cadastral_numbers',[])) else 1)
+    return pending
 
 
 def refresh_files(result,prior):
@@ -128,12 +154,12 @@ def file_queue(result,retry=False):
                   key=lambda f: (0 if retry and f['state']=='error' else 1, priority(f)))
 
 
-def persist(project,result):
+def persist(project,result,active=False):
     result['updated_at']=store.now()
     result['id']=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()[:20]
     folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
     (folder/(result['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
-    store.set_setting('torgi_documents_'+project,result)
+    store.set_setting(setting_key(project,active),result)
 
 
 def reprocess_queue(result):
@@ -148,16 +174,18 @@ def reprocess_queue(result):
     return [f for f in result.get('files',{}).values() if outdated(f)]
 
 
-def reprocess(project,params):
-    old=store.get_setting('torgi_documents_'+project)
-    search=store.get_setting('torgi_'+project)
+def reprocess(project,params,active=False):
+    old=store.get_setting(setting_key(project,active))
+    search=store.get_setting(torgi.setting_key(project,active))
     if not old or params.get('id')!=old['id'] or not same_search(search,old):
         raise ValueError('Каталог документов/поиск изменился; обновите страницу')
-    result=copy.deepcopy(old);selected=reprocess_queue(result)[:BATCH]
+    result=copy.deepcopy(old);selected=reprocess_queue(result)[:BATCH];catalog_id=old['id']
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0}
-    store.set_setting('torgi_reprocess_attempt_'+project,attempt)
+    attempt_key=torgi.setting_key(project,active,'_reprocess_attempt')
+    store.set_setting(attempt_key,attempt)
     try:
         for file in selected:
+            assert_current(project,search,catalog_id,active)
             fmt=file['format'];algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
             try:
                 digest=file.get('sha256')
@@ -172,63 +200,74 @@ def reprocess(project,params):
             except Exception as exc:
                 file.update(state='rejected',error=str(exc)[:500],reprocessed_at=store.now(),tables=[],egrn_tables=[],
                             reprocess_algorithm=algorithm)
-            attempt['processed']+=1;persist(project,result)
-            store.set_setting('torgi_reprocess_attempt_'+project,attempt)
-        persist(project,result)
+            attempt['processed']+=1;catalog_id=persist_current(project,result,search,catalog_id,active)
+            store.set_setting(attempt_key,attempt)
+        catalog_id=persist_current(project,result,search,catalog_id,active)
         attempt.update(state='done',finished_at=store.now(),remaining=len(reprocess_queue(result)))
         with store.connect() as db:
             store.event(db,project,'torgi_reprocess',{'id':result['id'],'files':attempt['processed'],'network_requests':0})
         return {'processed':attempt['processed'],'remaining':attempt['remaining'],'network_requests':0}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
-    finally:store.set_setting('torgi_reprocess_attempt_'+project,attempt)
+    finally:store.set_setting(attempt_key,attempt)
 
 
-def metadata(project,params):
-    search=store.get_setting('torgi_'+project)
+def metadata(project,params,active=False):
+    search=store.get_setting(torgi.setting_key(project,active))
     if not search or params.get('search_id')!=search['id']:raise ValueError('Поиск изменился; обновите страницу')
+    if params.get('search_source_id') is not None and params['search_source_id']!=torgi.source_id(search):
+        raise ValueError('Исходный поиск изменился; обновите страницу')
     retry=params.get('retry_errors',False)
     if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
-    old=store.get_setting('torgi_documents_'+project,{}) or {}
+    old=store.get_setting(setting_key(project,active),{}) or {}
+    if params.get('id') is not None and params['id']!=old.get('id'):
+        raise ValueError('Каталог изменился; обновите страницу')
+    catalog_id=old.get('id')
     prior_files={**old.get('retained_files',{}),**old.get('files',{})}
     result=copy.deepcopy(old)
     # A new actual search requires fresh cards; geometry-only updates retain dated cards.
     same=same_search(search,result)
-    known={lot['id'] for lot in search['lots']}
+    known={lot['id'] for lot in search['lots'] if not active or (lot.get('type') or {}).get('code')=='ZK'}
     result.update(search_id=search['id'],search_source_id=torgi.source_id(search),search_created_at=search['created_at'],warning=WARNING,
                   cards=[c for c in old.get('cards',[]) if same and c['lot_id'] in known],geometry_confirmed=False)
-    selected=metadata_queue(search,result,retry)[:BATCH]
+    if active:result['scope']='regional_active_zk'
+    survey=store.get_setting('survey_'+project)
+    selected=metadata_queue(search,result,retry,active,survey)[:BATCH]
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected)}
-    store.set_setting('torgi_documents_attempt_'+project,attempt)
+    attempt_key=setting_key(project,active,'_attempt')
+    store.set_setting(attempt_key,attempt)
     try:
         for lot in selected:
+            assert_current(project,search,catalog_id,active)
             url=CARD+lot['id'];attempt['lot_id']=lot['id']
-            store.set_setting('torgi_documents_attempt_'+project,attempt)
+            store.set_setting(attempt_key,attempt)
             try:
                 raw,ct,code=fetch(url,max_bytes=2*1024*1024)
             except Exception as exc:
+                assert_current(project,search,catalog_id,active)
                 result['cards']=[c for c in result['cards'] if c['lot_id']!=lot['id']]+[{'lot_id':lot['id'],'state':'error','error':str(exc)[:500],'checked_at':store.now()}]
                 attempt.update(state='partial',error=str(exc)[:500]);break
+            assert_current(project,search,catalog_id,active)
             digest=hashlib.sha256(raw).hexdigest()
-            try:
-                card=normalize_card(json.loads(raw),lot)
-                card.update(source=url,received_at=store.now(),sha256=digest,http_status=code)
-            except (ValueError,TypeError,KeyError) as exc:
-                card={'lot_id':lot['id'],'state':'error','error':str(exc)[:500],'checked_at':store.now(),'source':url,'sha256':digest}
+            data=json.loads(raw)
+            card=normalize_card(data,lot)
+            if active and data.get('biddType') and data['biddType'].get('code')!='ZK':
+                raise ValueError('Карточка относится к другому виду торгов; прежний каталог сохранён')
+            card.update(source=url,received_at=store.now(),sha256=digest,http_status=code)
             # Only normalized fields are persisted; raw account/payment/owner fields are excluded.
             result['cards']=[c for c in result['cards'] if c['lot_id']!=lot['id']]+[card]
             refresh_files(result,prior_files)
-            attempt['processed']+=1;persist(project,result)
-            store.set_setting('torgi_documents_attempt_'+project,attempt);time.sleep(2)
+            attempt['processed']+=1;catalog_id=persist_current(project,result,search,catalog_id,active)
+            store.set_setting(attempt_key,attempt);time.sleep(2)
         refresh_files(result,prior_files)
-        persist(project,result)
+        catalog_id=persist_current(project,result,search,catalog_id,active)
         if attempt['state']=='running':attempt['state']='done'
-        attempt.update(finished_at=store.now(),remaining=len(metadata_queue(search,result)))
+        attempt.update(finished_at=store.now(),remaining=len(metadata_queue(search,result,active=active,survey=survey)))
         with store.connect() as db:store.event(db,project,'torgi_document_cards',{'id':result['id'],'cards':attempt['processed'],'state':attempt['state']})
         return {'processed':attempt['processed'],'remaining':attempt['remaining'],'state':attempt['state']}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
-    finally:store.set_setting('torgi_documents_attempt_'+project,attempt)
+    finally:store.set_setting(attempt_key,attempt)
 
 
 def extract_file(path,digest,fmt):
@@ -245,20 +284,22 @@ def extract_file(path,digest,fmt):
     return result
 
 
-def read(project,params):
-    old=store.get_setting('torgi_documents_'+project)
-    search=store.get_setting('torgi_'+project)
+def read(project,params,active=False):
+    old=store.get_setting(setting_key(project,active))
+    search=store.get_setting(torgi.setting_key(project,active))
     if not old or params.get('id')!=old['id'] or not same_search(search,old):
         raise ValueError('Каталог документов/поиск изменился; сначала загрузите карточки')
     retry=params.get('retry_errors',False)
     if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
-    result=copy.deepcopy(old);selected=file_queue(result,retry)[:BATCH]
+    result=copy.deepcopy(old);selected=file_queue(result,retry)[:BATCH];catalog_id=old['id']
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0,'cached_files':0}
-    store.set_setting('torgi_files_attempt_'+project,attempt)
+    attempt_key=torgi.setting_key(project,active,'_files_attempt')
+    store.set_setting(attempt_key,attempt)
     folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
     try:
         for file in selected:
-            attempt['file_key']=file['key'];store.set_setting('torgi_files_attempt_'+project,attempt)
+            assert_current(project,search,catalog_id,active)
+            attempt['file_key']=file['key'];store.set_setting(attempt_key,attempt)
             try:
                 digest=file.get('sha256')
                 cached=folder/(digest+'.'+file['format']) if isinstance(digest,str) and re.fullmatch(r'[0-9a-f]{64}',digest) else None
@@ -276,10 +317,12 @@ def read(project,params):
                     file.update(received_at=store.now(),sha256=hashlib.sha256(raw).hexdigest(),http_status=code,content_type=ct,actual_size=len(raw))
             except ResponseTooLarge as exc:
                 file.update(state='rejected',error=str(exc)[:500],checked_at=store.now())
-                attempt['processed']+=1;persist(project,result);continue
+                attempt['processed']+=1;catalog_id=persist_current(project,result,search,catalog_id,active);continue
             except Exception as exc:
+                assert_current(project,search,catalog_id,active)
                 file.update(state='error',error=str(exc)[:500],checked_at=store.now())
                 attempt.update(state='partial',error=str(exc)[:500]);break
+            assert_current(project,search,catalog_id,active)
             digest=hashlib.sha256(raw).hexdigest();path=folder/(digest+'.'+file['format'])
             try:
                 validate_download(file,raw)
@@ -287,9 +330,9 @@ def read(project,params):
                 file.update(extract_file(path,digest,file['format']),state='read',geometry_confirmed=False)
                 file.pop('error',None)
             except Exception as exc:file.update(state='rejected',error=str(exc)[:500])
-            attempt['processed']+=1;persist(project,result)
-            store.set_setting('torgi_files_attempt_'+project,attempt);time.sleep(2)
-        persist(project,result)
+            attempt['processed']+=1;catalog_id=persist_current(project,result,search,catalog_id,active)
+            store.set_setting(attempt_key,attempt);time.sleep(2)
+        catalog_id=persist_current(project,result,search,catalog_id,active)
         if attempt['state']=='running':attempt['state']='done'
         attempt.update(finished_at=store.now(),remaining=len(file_queue(result)))
         with store.connect() as db:store.event(db,project,'torgi_files',{'id':result['id'],'files':attempt['processed'],'state':attempt['state'],
@@ -298,4 +341,4 @@ def read(project,params):
                 'network_requests':attempt['network_requests'],'cached_files':attempt['cached_files']}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
-    finally:store.set_setting('torgi_files_attempt_'+project,attempt)
+    finally:store.set_setting(attempt_key,attempt)

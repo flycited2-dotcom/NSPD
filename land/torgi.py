@@ -15,7 +15,7 @@ SEARCH = 'https://torgi.gov.ru/new/api/public/lotcards/search'
 PAGE_SIZE, MAX_PAGES, MAX_GEOMETRIES = 10, 20, 20
 CAD = re.compile(r'(?<![\d:])\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10}(?![\d:])')
 WARNING = 'Поиск по тексту, региону Крым и земельной категории; не полный реестр земли выбранной области. История процедуры не подтверждает сегодняшнюю доступность. Заявления, не опубликованные в источнике, не видны. Геометрия берётся отдельно из НСПД и не заменяет схему лота.'
-ACTIVE_WARNING = 'Получены публикации земельной категории по Крыму со статусами «Опубликован» и «Приём заявок», без текстового адресного фильтра. Все страницы запроса не подтверждают полноту извещений или свободность земли. Лоты без геометрии остаются неопределёнными относительно области.'
+ACTIVE_WARNING = 'Получены публикации земельной категории по Крыму со статусами «Опубликован» и «Приём заявок», без текстового адресного фильтра. Предоставление земли (ZK) и реализация имущества должников (229FZ) показаны отдельно. Все страницы запроса не подтверждают полноту извещений или свободность земли. Лоты без геометрии остаются неопределёнными относительно области.'
 
 
 def setting_key(project, active=False, suffix=''):
@@ -25,6 +25,11 @@ def setting_key(project, active=False, suffix=''):
 def canonical(value):
     value = str(value or '').strip()
     return ':'.join(str(int(x)) for x in value.split(':')) if CAD.fullmatch(value) else None
+
+
+def land_group(lot):
+    code = (lot.get('type') or {}).get('code')
+    return 'land_provision' if code == 'ZK' else 'debt_sale' if code == '229FZ' else 'other'
 
 
 def text(value, limit=10000):
@@ -134,6 +139,7 @@ def relate(lots, geometries, survey):
     boundary = box(*survey['bounds']) if survey else None
     metric = f'+proj=laea +lat_0={boundary.centroid.y} +lon_0={boundary.centroid.x} +datum=WGS84 +units=m +no_defs' if boundary else None
     for lot in lots:
+        lot['land_group'] = land_group(lot)
         lot['spatial_matches'] = []
         lot['geometry_lookups'] = []
         lot['geometry_confirmed'] = False
@@ -277,6 +283,8 @@ def locate(project, params, active=False):
                       or (retry and observations[n].get('state') in retry_states)})
     deferred = []
     if active:
+        land_numbers = {n for lot in result['lots'] if land_group(lot) == 'land_provision' for n in lot['cadastral_numbers']}
+        numbers.sort(key=lambda n: (n not in land_numbers, n))
         prefixes = {':'.join(n.split(':')[:2]) for n in survey_geometries(survey)}
         if prefixes:
             deferred = [n for n in numbers if ':'.join(n.split(':')[:2]) not in prefixes]

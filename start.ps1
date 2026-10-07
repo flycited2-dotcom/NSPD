@@ -25,4 +25,4 @@ if (-not $running) {
     }
 }
 if (-not $running) { throw 'App did not start. Check data/server-errors.log and port 8765.' }
-Start-Process $address
+Start-Process ($address + '/nspd.html')

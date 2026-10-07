@@ -25,6 +25,7 @@ el('save-area').addEventListener('click',async()=>{try{await api('/api/nspd/area
 LandBasemap.bind(nmap,el('osm'));
 drawArea();
 async function api(path,data){
+  if(data&&!token)token=(await api('/api/session')).token;
   const r=await fetch(path,data?{method:'POST',headers:{'Content-Type':'application/json','X-Local-Token':token},body:JSON.stringify({project:'trudovoe',...data})}:{});
   const body=await r.json();if(!r.ok)throw Error(body.error||'Ошибка сервера');return body;
 }
