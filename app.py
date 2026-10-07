@@ -23,7 +23,7 @@ from land import survey
 from land import publications
 from land import planning_watch, planning_maps, planning_boundary, planning_archive, planning_regulations
 from land import torgi
-from land import municipal, land_status
+from land import municipal, land_status, planning_enquiry
 from land import municipal_local
 from land import municipal_large
 from land import ocr
@@ -115,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
             project = project_name(query.get('project', ['trudovoe'])[0])
             if p.path == '/api/state':
                 return self.send(state(project))
-            if p.path in ('/api/recon','/api/recon/export','/api/recon/geojson','/api/recon/report','/api/recon/dossier','/api/recon/rights-request','/api/recon/rights-request.geojson'):
+            if p.path in ('/api/recon','/api/recon/export','/api/recon/geojson','/api/recon/report','/api/recon/dossier','/api/recon/rights-request','/api/recon/rights-request.geojson','/api/recon/planning-request','/api/recon/planning-request.geojson'):
                 data=recon.report(project)
                 with JOB_LOCK:active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
                 if data['attempt'] and data['attempt']['state']=='running' and not active:data['attempt']=dict(data['attempt'],state='interrupted')
@@ -125,6 +125,12 @@ class Handler(BaseHTTPRequestHandler):
                     if p.path.endswith('.geojson'):
                         return self.send(land_status.enquiry_geometry(data,candidate_id),content_type='application/geo+json; charset=utf-8',filename='land-enquiry-contour.geojson')
                     return self.send(land_status.enquiry(data,candidate_id),content_type='text/plain; charset=utf-8',filename='land-information-request.txt')
+                if p.path in ('/api/recon/planning-request','/api/recon/planning-request.geojson'):
+                    data=recon.load(project,query.get('result_id',[''])[0])
+                    candidate_id=query.get('id',[''])[0]
+                    if p.path.endswith('.geojson'):
+                        return self.send(planning_enquiry.geometry(data,candidate_id),content_type='application/geo+json; charset=utf-8',filename='pzz-enquiry-contour.geojson')
+                    return self.send(planning_enquiry.enquiry(data,candidate_id),content_type='text/plain; charset=utf-8',filename='pzz-information-request.txt')
                 if p.path=='/api/recon/dossier':
                     data=recon.load(project,query.get('result_id',[''])[0])
                     return self.send(recon.html_report(data,query.get('id',[''])[0]),content_type='text/html; charset=utf-8')

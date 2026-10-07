@@ -28,10 +28,17 @@ def main():
                        for i, page in enumerate(reader.pages[:200]) if any(key in page for key in ('/VP', '/LGIDict', '/Measure'))]
             metadata, pages = municipal.pdfium_text(raw, 200)
             result = dict(metadata, **planning_maps.text_index(pages, markers), algorithm=planning_maps.ALGORITHM)
+        elif mode == 'markers':
+            if not 1 <= count <= planning_maps.planning_regulations.MAX_PAGES:
+                raise ValueError('Число страниц PDF карты вне предела 1–2000')
+            markers = [{'page': i + 1, 'keys': [key for key in ('/VP', '/LGIDict', '/Measure') if key in page]}
+                       for i, page in enumerate(reader.pages) if any(key in page for key in ('/VP', '/LGIDict', '/Measure'))]
+            result = {'algorithm': planning_maps.FULL_ALGORITHM, 'total_pages': count,
+                      'markers_processed_pages': count, 'standard_geopdf_markers': markers}
         elif mode == 'render':
             page, folder = int(sys.argv[4]), Path(sys.argv[5])
-            if not 1 <= page <= min(count, 200):
-                raise ValueError('Страница вне предела 1–200')
+            if not 1 <= page <= min(count, planning_maps.planning_regulations.MAX_PAGES):
+                raise ValueError('Страница вне предела 1–2000')
             binary = shutil.which('pdftoppm')
             if not binary:
                 raise ValueError('Poppler pdftoppm не найден; карта не отрисована')

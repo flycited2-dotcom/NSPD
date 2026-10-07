@@ -198,6 +198,127 @@ def test_actual_isolated_worker_reads_pdf(workspace):
         assert pm.checked_image(sha,1,rendered).startswith(b'\x89PNG')
 
 
+def complete_late_text(workspace, monkeypatch):
+    from land import planning_regulations as pr
+    sha = source(workspace)
+    catalog = store.get_setting('planning_watch_trudovoe')
+    catalog['items'][0]['total_pages'] = 507
+    store.set_setting('planning_watch_trudovoe', catalog)
+    def text_window(sha, start, total):
+        return {'algorithm': pr.ALGORITHM, 'source_sha256': sha, 'start': start, 'total_pages': total,
+                'pages': [{'page': p, 'text': 'Фрагмент карты градостроительного зонирования\nстарая редакция\nновая редакция\nЖ2'
+                          if p in (506,507) else 'Обычный текст правил землепользования'}
+                         for p in range(start, min(start + 40, total + 1))]}
+    monkeypatch.setattr(pr, 'read_window', text_window)
+    pr.read('trudovoe', {'id': None, 'planning_id': 'p1'})
+    full = pr.report('trudovoe')['result']
+    return sha, full['documents'][0], full['id']
+
+
+def marker_result(sha):
+    return {'algorithm': pm.FULL_ALGORITHM, 'source_sha256': sha, 'total_pages': 507,
+            'markers_processed_pages': 507, 'standard_geopdf_markers': [{'page': 507, 'keys': ['/VP']}]}
+
+
+def test_full_verified_text_discovers_late_maps_and_preserves_prefix_cache(workspace, monkeypatch):
+    sha, row, text_id = complete_late_text(workspace, monkeypatch)
+    folder = store.DATA / 'planning_maps' / sha; folder.mkdir(parents=True, exist_ok=True)
+    prefix_path = folder / (pm.ALGORITHM + '.json'); prefix_path.write_bytes(b'old-prefix-cache')
+    calls = []
+    def markers(mode, source_sha, page=None):
+        calls.append(mode); assert mode == 'markers'; return marker_result(source_sha)
+    monkeypatch.setattr(pm, 'worker', markers)
+    result = pm.inspect_full_text(sha, row)
+    assert result['processed_pages'] == 507 and result['unread_pages'] == 0
+    assert [p['page'] for p in result['map_pages']] == [506,507]
+    assert result['standard_geopdf_markers'][0]['page'] == 507
+    assert not result['map_geometry_confirmed'] and not result['coordinate_georeferencing_confirmed']
+    assert pm.inspect_full_text(sha, row)['cached'] and calls == ['markers']
+    assert prefix_path.read_bytes() == b'old-prefix-cache'
+
+
+def test_full_text_window_tamper_rejects_cached_map_analysis(workspace, monkeypatch):
+    from land import planning_regulations as pr
+    sha, row, text_id = complete_late_text(workspace, monkeypatch)
+    monkeypatch.setattr(pm, 'worker', lambda *args: marker_result(sha))
+    pm.inspect_full_text(sha, row)
+    path = store.DATA / 'planning_regulations' / pr.ALGORITHM / sha / '481.json'
+    path.write_bytes(path.read_bytes() + b' ')
+    with pytest.raises(ValueError, match='изменилась'):
+        pm.inspect_full_text(sha, row)
+
+
+def test_full_map_snapshot_depends_on_text_version_and_reports_complete_coverage(workspace, monkeypatch):
+    from land import planning_regulations as pr
+    sha, row, text_id = complete_late_text(workspace, monkeypatch)
+    monkeypatch.setattr(pm, 'worker', lambda *args: marker_result(sha))
+    monkeypatch.setattr(pm, 'render_page', png)
+    pm.run('trudovoe', {'planning_id': 'p1', 'survey_id': 's1'})
+    report = pm.report('trudovoe')
+    assert report['result']['text_source_id'] == text_id and not report['stale']
+    assert report['coverage'] == {'processed_pages':507,'total_pages':507,'unread_pages':0,'failed_documents':0}
+    assert report['image_summary']['rendered'] == 2
+    assert not report['result']['geometry_confirmed']
+    full = pr.load('trudovoe'); full['observation_note'] = 'new-index-version'; pr.save('trudovoe', full)
+    assert pm.report('trudovoe')['stale']
+    with pytest.raises(ValueError, match='прежним'):
+        pm.preview('trudovoe', 'doc', 506)
+
+
+def test_full_text_changed_during_render_cannot_replace_map_snapshot(workspace, monkeypatch):
+    from land import planning_regulations as pr
+    sha, row, text_id = complete_late_text(workspace, monkeypatch)
+    store.set_setting('planning_maps_trudovoe', {'id':'previous','documents':[]})
+    monkeypatch.setattr(pm, 'worker', lambda *args: marker_result(sha))
+    def changed(sha, page):
+        full = pr.load('trudovoe'); full['note'] = str(page); pr.save('trudovoe', full)
+        return png(sha,page)
+    monkeypatch.setattr(pm, 'render_page', changed)
+    with pytest.raises(ValueError, match='Полный текст изменился'):
+        pm.run('trudovoe', {'planning_id':'p1','survey_id':'s1'})
+    assert store.get_setting('planning_maps_trudovoe')['id'] == 'previous'
+
+
+def test_prefix_without_complete_full_text_is_explicitly_incomplete(workspace, monkeypatch):
+    sha = source(workspace)
+    catalog = store.get_setting('planning_watch_trudovoe'); catalog['items'][0]['total_pages'] = 507
+    store.set_setting('planning_watch_trudovoe', catalog)
+    prefix = index(sha); prefix.update(total_pages=507,processed_pages=200,unread_pages=307)
+    monkeypatch.setattr(pm, 'inspect_pdf', lambda sha: prefix)
+    monkeypatch.setattr(pm, 'render_page', png)
+    pm.run('trudovoe', {'planning_id':'p1','survey_id':'s1'})
+    report = pm.report('trudovoe')
+    assert report['coverage']['unread_pages'] == 307 and report['result']['documents'][0]['coverage'] == 'prefix_only'
+    assert report['result']['text_source_id'] is None
+
+
+def test_full_marker_coverage_and_page_limits_are_verified():
+    value = index('a' * 64)
+    value.update(algorithm=pm.FULL_ALGORITHM,total_pages=507,processed_pages=507,unread_pages=0,markers_processed_pages=200)
+    with pytest.raises(ValueError, match='не охватывает'):
+        pm.validate_index(value)
+    value['markers_processed_pages'] = 507
+    value['standard_geopdf_markers'] = [{'page':508,'keys':['/VP']}]
+    with pytest.raises(ValueError, match='GeoPDF'):
+        pm.validate_index(value)
+
+
+def test_real_worker_checks_late_geopdf_fields_and_renders_late_page(workspace):
+    from pypdf import PdfWriter
+    from pypdf.generic import NameObject, DictionaryObject
+    writer = PdfWriter()
+    for _ in range(205): writer.add_blank_page(width=100,height=100)
+    writer.pages[204][NameObject('/LGIDict')] = DictionaryObject()
+    buffer = io.BytesIO(); writer.write(buffer); raw = buffer.getvalue(); sha = hashlib.sha256(raw).hexdigest()
+    folder = workspace/'planning_watch'; folder.mkdir(); (folder/(sha+'.pdf')).write_bytes(raw)
+    markers = pm.worker('markers',sha)
+    assert markers['markers_processed_pages'] == 205 and markers['standard_geopdf_markers'] == [{'page':205,'keys':['/LGIDict']}]
+    import shutil
+    if shutil.which('pdftoppm'):
+        image = pm.worker('render',sha,205)
+        assert pm.checked_image(sha,205,image).startswith(b'\x89PNG')
+
+
 def many_maps(workspace,monkeypatch):
     sha=source(workspace);catalog=store.get_setting('planning_watch_trudovoe')
     original=catalog['items'][0];catalog['items']=[dict(original,id='doc'+str(n),total_pages=12) for n in range(3)]

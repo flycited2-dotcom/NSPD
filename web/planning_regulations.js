@@ -24,6 +24,7 @@ async function readRegulations(){
    if(state.result.run_errors||fresh.counts.errors)throw Error('Есть ошибки чтения. Сохранённые страницы доступны; для повторной попытки отметьте «Повторить ошибки» и запустите чтение.');
    if(!fresh.counts.remaining_pages||!state.result.new_pages)break;
   }
+  if(typeof refreshPzzMaps==='function')await refreshPzzMaps();
   if(typeof refreshRecon==='function')await refreshRecon();
  }catch(e){el('regulations-status').textContent+=' Не завершено: '+e.message}
  finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);const disabled=!regulationReport?.catalog_id||Boolean(regulationReport?.result&&!regulationReport.stale&&!regulationReport.counts.remaining_pages);el('regulations-read').disabled=disabled}

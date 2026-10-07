@@ -8,10 +8,11 @@ import sys
 from pathlib import Path
 from urllib.parse import urlencode
 from shapely.geometry import box, shape
-from . import store, planning_watch, torgi
+from . import store, planning_watch, planning_regulations, torgi
 
 ALGORITHM = 'pzz-map-pairs-v2'
-RESULT_ALGORITHM = 'pzz-map-catalog-v3'
+RESULT_ALGORITHM = 'pzz-map-catalog-v4'
+FULL_ALGORITHM = 'pzz-map-full-text-v1'
 RENDER_ALGORITHM = 'pzz-map-poppler-2400-v1'
 MAX_DOCUMENTS, MAX_BYTES = 40, 32 * 1024 * 1024
 MAX_MAP_PAGES = 24
@@ -58,7 +59,7 @@ def worker(mode, sha, page=None):
     result = json.loads(output.stdout)
     if output.returncode or result.get('error'):
         raise ValueError(result.get('error') or 'Ошибка обработки карты ПЗЗ')
-    algorithm = ALGORITHM if mode == 'inspect' else RENDER_ALGORITHM
+    algorithm = ALGORITHM if mode == 'inspect' else FULL_ALGORITHM if mode == 'markers' else RENDER_ALGORITHM
     if result.get('source_sha256') != sha or result.get('algorithm') != algorithm or (mode == 'render' and result.get('page') != page):
         raise ValueError('Результат относится к другому PDF/странице/алгоритму')
     return result
@@ -84,10 +85,76 @@ def inspect_pdf(sha):
     return dict(result, cached=False)
 
 
+def full_text_source(project, catalog):
+    result = planning_regulations.load(project)
+    if not result or result['planning_id'] != (catalog or {}).get('id'):
+        return None, {}
+    rows = {r['sha256']: r for r in result['documents'] if r['total_pages'] > 200
+            and sum(w['count'] for w in r['windows']) == r['total_pages']}
+    return (result['id'] if rows else None), rows
+
+
+def inspect_full_text(sha, row):
+    """Use verified completed text windows; inspect GeoPDF fields separately in isolation."""
+    pdf_path(sha)
+    if row.get('sha256') != sha or not 200 < row['total_pages'] <= planning_regulations.MAX_PAGES:
+        raise ValueError('Полный текст относится к другому/неподдержанному PDF')
+    start = 1
+    sparse = []
+    for w in row['windows']:
+        value = planning_regulations.cached_window(row, w)
+        if w['start'] != start:
+            raise ValueError('Полный текст пропускает страницы')
+        start += len(value['pages'])
+        sparse.extend(p['page'] for p in value['pages'] if len(''.join(p['text'].split())) < 20)
+    if start != row['total_pages'] + 1:
+        raise ValueError('Полный текст PDF ещё не прочитан')
+    signature = planning_watch.digest({'sha256': sha, 'algorithm': planning_regulations.ALGORITHM,
+        'windows': [{k: w[k] for k in ('start', 'count', 'sha256')} for w in row['windows']]})
+    folder = store.DATA / 'planning_maps' / sha
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (FULL_ALGORITHM + '-' + signature[:20] + '.json')
+    if path.exists():
+        if path.stat().st_size > 4 * 1024 * 1024:
+            raise ValueError('Кеш полного анализа карт превышает 4 МБ')
+        result = json.loads(path.read_text(encoding='utf-8'))
+        saved_hash = result.pop('content_sha256', None)
+        if (result.get('source_sha256') != sha or result.get('algorithm') != FULL_ALGORITHM
+                or result.get('text_source_signature') != signature or saved_hash != planning_watch.digest(result)):
+            raise ValueError('Кеш полного анализа карты изменился')
+        validate_index(result)
+        return dict(result, cached=True)
+    markers = worker('markers', sha)
+    if markers.get('total_pages') != row['total_pages'] or markers.get('markers_processed_pages') != row['total_pages']:
+        raise ValueError('Проверка полей GeoPDF не охватывает этот файл')
+    def pages():
+        for w in row['windows']:
+            for p in planning_regulations.cached_window(row, w)['pages']:
+                yield p['page'], p['text']
+    result = dict(text_index(pages(), markers['standard_geopdf_markers']), algorithm=FULL_ALGORITHM,
+                  total_pages=row['total_pages'], processed_pages=row['total_pages'], unread_pages=0,
+                  image_or_sparse_pages=sparse, text_layer_complete=not sparse,
+                  source_sha256=sha, text_source_signature=signature,
+                  markers_processed_pages=markers['markers_processed_pages'])
+    validate_index(result)
+    store.atomic_write(path, json.dumps(dict(result, content_sha256=planning_watch.digest(result)), ensure_ascii=False, indent=2).encode('utf-8'))
+    return dict(result, cached=False)
+
+
 def validate_index(result):
     total, processed = result.get('total_pages'), result.get('processed_pages')
-    if type(total) is not int or type(processed) is not int or not 1 <= processed <= min(total, 200) or result.get('unread_pages') != total - processed:
+    limit = planning_regulations.MAX_PAGES if result.get('algorithm') == FULL_ALGORITHM else 200
+    if type(total) is not int or type(processed) is not int or not 1 <= processed <= min(total, limit) or result.get('unread_pages') != total - processed:
         raise ValueError('Некорректный предел страниц карты ПЗЗ')
+    if result.get('algorithm') == FULL_ALGORITHM and (processed != total or result.get('markers_processed_pages') != total):
+        raise ValueError('Полный анализ карты не охватывает все страницы/поля GeoPDF')
+    markers = result.get('standard_geopdf_markers', [])
+    if not isinstance(markers, list) or len(markers) > processed:
+        raise ValueError('Некорректный объём полей GeoPDF')
+    marker_pages = [m.get('page') for m in markers]
+    if (len(set(marker_pages)) != len(marker_pages) or any(type(p) is not int or not 1 <= p <= processed for p in marker_pages)
+            or any(not isinstance(m.get('keys'), list) or not m['keys'] or not set(m['keys']) <= {'/VP', '/LGIDict', '/Measure'} for m in markers)):
+        raise ValueError('Некорректная страница/структура полей GeoPDF')
     pages = result.get('map_pages')
     if not isinstance(pages, list) or len(pages) > MAX_MAP_PAGES:
         raise ValueError('Картографических страниц больше разрешённого предела')
@@ -227,9 +294,11 @@ def run(project, params):
     if not rows:
         raise ValueError('Нет прочитанных PDF ПЗЗ из наблюдаемых перечней')
     old=store.get_setting('planning_maps_'+project)
+    text_source_id, full_rows = full_text_source(project, catalog)
     old_pages={(d.get('sha256'),p['page']):p for d in (old or {}).get('documents',[]) for p in d.get('map_pages',[])}
     result = {'planning_id': catalog['id'], 'survey_id': (survey or {}).get('id'), 'created_at': store.now(), 'documents': [],
               'survey_source_signature':survey_signature(survey),
+              'text_source_id':text_source_id,
               'algorithm': RESULT_ALGORITHM, 'geometry_confirmed': False, 'legal_status_confirmed': False, 'network_requests': 0, 'warning': WARNING}
     result['previous_result_id'] = (old or {}).get('id')
     attempt = {'state': 'running', 'started_at': store.now(), 'requested': len(rows), 'processed': 0, 'network_requests': 0}
@@ -238,10 +307,10 @@ def run(project, params):
         for row in rows:
             entry = {k: copy.deepcopy(row.get(k)) for k in ('id', 'url', 'title', 'sha256', 'received_at', 'act_identity', 'listing_references')}
             try:
-                details = inspect_pdf(row['sha256'])
+                details = inspect_full_text(row['sha256'], full_rows[row['sha256']]) if row['sha256'] in full_rows else inspect_pdf(row['sha256'])
                 if details['total_pages'] != row['total_pages']:
                     raise ValueError('Число страниц PDF изменилось')
-                entry.update(details, state='indexed')
+                entry.update(details, state='indexed', coverage='complete' if not details['unread_pages'] else 'prefix_only')
                 if sum(len(x['map_pages']) for x in result['documents']) + len(entry['map_pages']) > MAX_TOTAL_MAP_PAGES:
                     raise ValueError('Общее число карт превышает предел каталога')
                 for page in entry['map_pages']:
@@ -266,6 +335,8 @@ def run(project, params):
             current_survey = store.get_setting('survey_' + project) or {}
             if current.get('id') != catalog['id'] or current_survey.get('id') != (survey or {}).get('id'):
                 raise ValueError('Документы или область изменились во время анализа; прежний результат сохранён')
+            if full_text_source(project, current)[0] != text_source_id:
+                raise ValueError('Полный текст изменился во время анализа; прежний результат сохранён')
             if (store.get_setting('planning_maps_'+project) or {}).get('id')!=(old or {}).get('id'):
                 raise ValueError('Другая версия карт уже записана; прежний результат сохранён')
             save(project,result)
@@ -304,11 +375,18 @@ def report(project):
     catalog = store.get_setting('planning_watch_' + project) or {}
     survey = store.get_setting('survey_' + project) or {}
     attempt = store.get_setting('planning_maps_attempt_' + project)
+    text_source_id, _ = full_text_source(project, catalog)
     stale = bool(result and (result.get('algorithm')!=RESULT_ALGORITHM or result['planning_id'] != catalog.get('id')
+                 or result.get('text_source_id') != text_source_id
                  or 'survey_source_signature' not in result or result['survey_source_signature']!=survey_signature(survey)))
     pages=[p for d in (result or {}).get('documents',[]) for p in d.get('map_pages',[])]
     return {'result': result, 'stale': stale, 'current_planning_id': catalog.get('id'), 'current_survey_id': survey.get('id'),
-            'attempt': attempt, 'warning': WARNING,'image_summary':{'total':len(pages),'rendered':sum(bool(p.get('image')) for p in pages),
+            'current_text_source_id':text_source_id,'attempt': attempt, 'warning': WARNING,
+            'coverage':{'processed_pages':sum(d.get('processed_pages',0) for d in (result or {}).get('documents',[])),
+                        'total_pages':sum(d.get('total_pages',0) for d in (result or {}).get('documents',[])),
+                        'unread_pages':sum(d.get('unread_pages',0) for d in (result or {}).get('documents',[])),
+                        'failed_documents':sum(d.get('state')=='error' for d in (result or {}).get('documents',[]))},
+            'image_summary':{'total':len(pages),'rendered':sum(bool(p.get('image')) for p in pages),
                 'remaining':len(render_queue(result or {})),'errors':sum(bool(p.get('image_error')) for p in pages)}}
 
 
@@ -333,7 +411,10 @@ def html_report(project):
     content = []
     for doc in (data['result'] or {}).get('documents', []):
         act = doc.get('act_identity') or {}
-        content.append('<h2>' + esc(f"{act.get('date', '')} № {act.get('number', '')}") + '</h2><p><a href="' + esc(doc['url']) + '">Официальный PDF</a></p>')
+        content.append('<h2>' + esc(f"{act.get('date', '')} № {act.get('number', '')}") + '</h2><p><a href="' + esc(doc['url']) + '">Официальный PDF</a></p><p>Проверено страниц: '
+                       + esc(doc.get('processed_pages',0)) + '/' + esc(doc.get('total_pages','не установлено'))
+                       + '; непрочитано: ' + esc(doc.get('unread_pages','не установлено'))
+                       + '. ' + ('Полный сохранённый текст использован для поиска поздних карт.' if doc.get('algorithm') == FULL_ALGORITHM else 'Ограниченный разбор PDF, до первых 200 страниц.') + '</p>')
         if not doc['map_pages']:
             content.append('<p>Поддержанные картографические заголовки не найдены. Это не вывод об отсутствии ограничений.</p>')
         for page in doc['map_pages']:

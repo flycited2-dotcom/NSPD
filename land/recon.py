@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from shapely.affinity import rotate
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations
+from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations, planning_enquiry
 from .geometry import convert, polygons
 from .review import CHECKS
 
@@ -396,6 +396,7 @@ def html_report(data,candidate_id=None):
                       +'<h3>Особенности</h3><ul>'+''.join('<li>'+esc(f)+'</li>' for f in c['flags'])+'</ul><h3>Полученные совпадения</h3><ul>'+(''.join(evidence) or '<li>Совпадения не установлены. Это не подтверждение отсутствия процедур или ограничений.</li>')+'</ul>'
                       +'<h3>Ближайшие полученные участки</h3><ul>'+''.join('<li>'+esc(n['fields'].get('cad_num',n['id']))+' · '+esc(n['distance_m'])+' м · '+esc(json.dumps(n['fields'],ensure_ascii=False))+'</li>' for n in c['neighbours'])+'</ul>'
                       +planning_regulations.dossier_section(result)
+                      +planning_enquiry.dossier_section(result,c,data.get('stale',False))
                       +land_status.dossier_section(result,c,data.get('stale',False))
                       +'<h3>Недостающие проверки</h3><ul>'+''.join('<li>'+esc(x)+'</li>' for x in c['required_checks'])+'</ul><h3>Контур WGS84</h3><pre>'+esc(json.dumps(c['geometry'],ensure_ascii=False))+'</pre></section>')
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}@media print{section{break-before:page}}</style>'
