@@ -17,10 +17,11 @@ SOURCES = (
     {'title': 'Постановления 2026', 'url': 'https://trudovskoe-rk.ru/postanovleniya-2026/'},
     {'title': 'Постановления 2025', 'url': 'https://trudovskoe-rk.ru/postanovleniya-2025/'},
     {'title': 'Планировка территории', 'url': 'https://trudovskoe-rk.ru/stroitelstvo-i-arhitektura/'},
+    {'title': 'Административные регламенты', 'url': 'https://trudovskoe-rk.ru/administrativnye-reglamenty-predostavleniya-munitsipalnyh-uslug/'},
 )
 MAX_ITEMS, BATCH, MAX_PAGES = 500, 5, 40
 WORDS = ('земель', 'сервитут', 'планиров', 'межеван', 'пзз', 'аукцион', 'торги', 'извещение', 'обсужд')
-WARNING = 'Это ограниченный каталог трёх перечней, не полная история заявлений. Номер в тексте — упоминание, а не доказательство предмета извещения. Схемы без проверенных координат не размещаются на карте. Правовой статус, действующая редакция и сроки требуют отдельной проверки.'
+WARNING = 'Это ограниченный каталог четырёх перечней, не полная история заявлений. Номер в тексте — упоминание, а не доказательство предмета извещения. Схемы без проверенных координат не размещаются на карте. Наличие регламента в перечне не подтверждает его действие: в перечне могут оставаться отменённые акты. Правовой статус, действующая редакция и сроки требуют отдельной проверки.'
 LARGE_PDF_ALGORITHM = 'municipal-large-pdf-v1'
 
 
@@ -238,7 +239,7 @@ def persist(project, result):
     result['id'] = hashlib.sha256(json.dumps(result, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:20]
     folder = store.DATA / 'municipal'
     folder.mkdir(exist_ok=True)
-    (folder / (result['id'] + '.json')).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    store.atomic_write(folder / (result['id'] + '.json'), json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
     store.set_setting('municipal_' + project, result)
 
 
@@ -263,7 +264,7 @@ def catalog(project):
             result['sources'].append(dict(source, received_at=date, sha256=digest, count=len(selected), http_status=code))
             for link in selected:
                 row = item(link, source['url'], date)
-                reference = {'title': link['title'], 'parent_url': source['url'], 'listed_at': date}
+                reference = {'title': link['title'], 'parent_url': source['url'], 'listed_at': date, 'sha256': digest}
                 if row['url'] in rows:
                     other = rows[row['url']]
                     other.setdefault('listing_references', [])
@@ -302,7 +303,7 @@ def save_raw(raw, fmt):
     digest = hashlib.sha256(raw).hexdigest()
     folder = store.DATA / 'municipal'
     folder.mkdir(exist_ok=True)
-    (folder / (digest + '.' + fmt)).write_bytes(raw)
+    store.atomic_write(folder / (digest + '.' + fmt), raw)
     return digest
 
 
@@ -342,7 +343,7 @@ def read(project, params):
                 if row['format'] == 'pdf':
                     details, pages = pdf_text(raw)
                     row.update(details)
-                    (store.DATA / 'municipal' / (digest + '.txt')).write_text('\n'.join(f'PAGE {n}\n{t}' for n, t in pages), encoding='utf-8')
+                    store.atomic_write(store.DATA / 'municipal' / (digest + '.txt'), '\n'.join(f'PAGE {n}\n{t}' for n, t in pages).encode('utf-8'))
                 else:
                     if 'text/html' not in ct.lower():
                         raise ValueError('Публикация не вернула HTML')

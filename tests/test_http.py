@@ -30,6 +30,33 @@ def request(server, path, data=None, token=True):
     return urllib.request.urlopen(req, timeout=10)
 
 
+def test_rights_enquiry_download_is_version_bound_unsent_and_never_mutates_registry(server):
+    from test_recon import fixture, BOUNDS
+    from land import recon
+    values = fixture()
+    for key, value in values.items():
+        store.set_setting(key + '_trudovoe', value)
+    recon.run('trudovoe', {'bounds': BOUNDS, 'refresh_nspd': False, 'refresh_torgi': False})
+    result = store.get_setting('recon_trudovoe')
+    c = result['candidates'][0]
+    suffix = '?result_id=' + result['id'] + '&id=' + c['id']
+    with request(server, '/api/recon/rights-request' + suffix) as response:
+        assert 'land-information-request.txt' in response.headers['Content-Disposition']
+        assert 'НЕ ОТПРАВЛЕН'.encode() in response.read()
+    with request(server, '/api/recon/rights-request.geojson' + suffix) as response:
+        body = json.load(response)
+        assert body['features'][0]['geometry'] == json.loads(json.dumps(c['geometry']))
+        assert body['source_result_id'] == result['id'] and not body['features'][0]['properties']['is_srzu']
+    store.set_setting('municipal_trudovoe', {'id': 'new', 'items': []})
+    with request(server, '/api/recon/rights-request' + suffix) as response:
+        assert 'устарела'.encode() in response.read()
+    for invalid in ('?result_id=../../secret&id=x', '?result_id=' + result['id'] + '&id=other'):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            request(server, '/api/recon/rights-request' + invalid)
+        assert error.value.code == 400
+    assert store.candidates('trudovoe') == [] and store.get_setting('recon_trudovoe') == result
+
+
 def test_municipal_local_export_and_protected_endpoint(server):
     store.set_setting('municipal_trudovoe',{'id':'m1','items':[]})
     store.set_setting('municipal_local_attempt_trudovoe',{'state':'running'})

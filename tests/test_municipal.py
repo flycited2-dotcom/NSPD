@@ -170,7 +170,7 @@ def test_one_file_with_conflicting_titles_preserves_both_references(db, monkeypa
     r = store.get_setting('municipal_trudovoe')['items']
     assert len(r) == 1 and r[0]['listing_conflict']
     assert {x['title'] for x in r[0]['listing_references']} == {'Планировка Дельфин','Планировка Эфиронос'}
-    assert len(r[0]['listing_references']) == 6
+    assert len(r[0]['listing_references']) == 2 * len(municipal.SOURCES)
 
 
 def test_identical_pdf_under_different_urls_with_different_titles():

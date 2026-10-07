@@ -10,11 +10,11 @@ from urllib.parse import urlparse
 from shapely.affinity import rotate
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch
+from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status
 from .geometry import convert, polygons
 from .review import CHECKS
 
-VERSION=5
+VERSION=6
 KEYS=('survey','torgi','torgi_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
@@ -226,12 +226,15 @@ def build(values,params):
                            'road_proximity':{'id':road[1]['id'],'distance_m':round(g.distance(road[0]),1),'fields':public_fields(road[1]),'received_at':layers['parcels'].get('received_at'),'legal_access_confirmed':False} if road else None,
                            'neighbours':neighbours,'matches':matches,'context_matches':context_matches,'boundary_observation':boundary_observation,'lots':related,'documents':document_context(values,numbers),
                            'flags':flags,'required_checks':list(CHECKS.values()),'status':'needs_review','rights_confirmed':False,'srzu_ready':False})
+    for candidate in candidates:
+        candidate['land_status']=land_status.assessment(candidate,values)
     source_numbers={n for lot in lots for n in lot['cadastral_numbers']}
     sources={'nspd':{mode:{key:layer.get(key) for key in ('source','sha256','received_at')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
              'torgi':{'id':(source or {}).get('id'),'received_at':(source or {}).get('created_at'),'query':(source or {}).get('query'),
                       'lots':len(lots),'unlocated_numbers':sorted(n for n in source_numbers if not observations.get(n,{}).get('features')),
                       'complete':False,'documents_current':torgi_docs.same_search(source,values.get('torgi_documents'))},
              'municipal':{'id':(values.get('municipal') or {}).get('id'),'catalog_at':(values.get('municipal') or {}).get('catalog_at'),'complete':False},
+             'land_status':land_status.procedures(values.get('municipal')),
              'planning':{'id':(values.get('planning_watch') or {}).get('id'),
                          'archive_source_id':(values.get('planning_watch') or {}).get('archive_source_id'),
                          'archive_counts':copy.deepcopy((values.get('planning_watch') or {}).get('archive_counts')),
@@ -302,7 +305,7 @@ def run(project,params):
             if identities(inputs(project))!=result['source_inputs']:raise ValueError('Источники изменились во время поиска; результат не записан')
             if (store.get_setting('recon_'+project) or {}).get('id')!=(old or {}).get('id'):raise ValueError('Другая версия поиска уже записана; обновите страницу')
             folder=store.DATA/'recon'/project;folder.mkdir(parents=True,exist_ok=True)
-            (folder/(result['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False),encoding='utf-8')
+            store.atomic_write(folder/(result['id']+'.json'),json.dumps(result,ensure_ascii=False).encode('utf-8'))
             store.set_setting('recon_'+project,result)
             with store.connect() as db:store.event(db,project,'recon',{'id':result['id'],'summary':result['summary'],'warnings':attempt['warnings']})
         attempt.update(state='done',finished_at=store.now(),step='Готово')
@@ -384,6 +387,7 @@ def html_report(data,candidate_id=None):
                       +'<p>До полученного кадастрового контура дорожного назначения: '+esc((c.get('road_proximity') or {}).get('distance_m'))+' м. Расстояние не подтверждает законный подъезд.</p>'
                       +'<h3>Особенности</h3><ul>'+''.join('<li>'+esc(f)+'</li>' for f in c['flags'])+'</ul><h3>Полученные совпадения</h3><ul>'+(''.join(evidence) or '<li>Совпадения не установлены. Это не подтверждение отсутствия процедур или ограничений.</li>')+'</ul>'
                       +'<h3>Ближайшие полученные участки</h3><ul>'+''.join('<li>'+esc(n['fields'].get('cad_num',n['id']))+' · '+esc(n['distance_m'])+' м · '+esc(json.dumps(n['fields'],ensure_ascii=False))+'</li>' for n in c['neighbours'])+'</ul>'
+                      +land_status.dossier_section(result,c,data.get('stale',False))
                       +'<h3>Недостающие проверки</h3><ul>'+''.join('<li>'+esc(x)+'</li>' for x in c['required_checks'])+'</ul><h3>Контур WGS84</h3><pre>'+esc(json.dumps(c['geometry'],ensure_ascii=False))+'</pre></section>')
     return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}@media print{section{break-before:page}}</style>'
             +'<h1>Поиск участков: рабочее досье</h1><p>'+esc(WARNING)+'</p><p>'+('Предыдущая версия: источники изменились.' if data.get('stale') else 'Датированная версия расчёта.')+'</p><p>Расчёт '+esc(result.get('created_at'))+'; цель '+esc(PURPOSES.get(result.get('parameters',{}).get('purpose'),'Не выбрана'))+'.</p>'
