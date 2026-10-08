@@ -23,7 +23,7 @@ from land import nspd
 from land import survey
 from land import publications
 from land import planning_watch, planning_maps, planning_boundary, planning_archive, planning_regulations
-from land import torgi
+from land import torgi, browser_lookups
 from land import municipal, land_status, planning_enquiry
 from land import municipal_local
 from land import municipal_large
@@ -439,6 +439,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Земельные публикации по всему Крыму', lambda: torgi.run(project, data, active=True)))
             if path == '/api/torgi/active/geometry':
                 return self.send(launch_job(project, 'Геометрия региональных публикаций', lambda: torgi.locate(project, data, active=True)))
+            if path == '/api/torgi/active/browser-geometry':
+                return self.send(launch_job(project, 'Импорт браузерных ответов НСПД', lambda: browser_lookups.run(project, data, active=True)))
             if path == '/api/torgi/active/rematch':
                 return self.send(launch_job(project, 'Сопоставление региональных публикаций', lambda: torgi.rematch(project, data, active=True)))
             if path == '/api/torgi/geometry':
