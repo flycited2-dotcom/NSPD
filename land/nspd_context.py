@@ -31,19 +31,33 @@ def catalog():
 
 def collect(bounds,previous=None):
     nspd.spatial_body(bounds,36368)
-    layers={}
+    layers={};stopped_reason=None
     for mode,entry in catalog().items():
-        row={'title':TITLES[mode],'category_id':entry['categoryId'],'source':nspd.INTERSECTS,'state':'error','complete':False}
+        row={'title':TITLES[mode],'category_id':entry['categoryId'],'source':nspd.INTERSECTS,
+             'state':'not_requested' if stopped_reason else 'error','requested':False,'complete':False}
         try:
-            payload,digest=nspd.request_json(nspd.INTERSECTS,nspd.spatial_body(bounds,entry['categoryId']))
-            kinds=('Polygon','MultiPolygon','LineString','MultiLineString') if mode=='red_lines' else ('Polygon','MultiPolygon')
-            fc=nspd.normalize(payload,kinds,FIELDS)
-            if len(fc['features'])>5000:raise ValueError('Слишком много объектов контекста; уменьшите область')
-            row.update(state='received',received_at=store.now(),sha256=digest,http_status=200,count=len(fc['features']),geojson=fc)
+            if stopped_reason:
+                row.update(checked_at=store.now(),stopped_reason=stopped_reason,
+                           error='Категория не запрошена: '+stopped_reason)
+            else:
+                row['requested']=True
+                payload,digest=nspd.request_json(nspd.INTERSECTS,nspd.spatial_body(bounds,entry['categoryId']))
+                row['http_status']=200
+                kinds=('Polygon','MultiPolygon','LineString','MultiLineString') if mode=='red_lines' else ('Polygon','MultiPolygon')
+                fc=nspd.normalize(payload,kinds,FIELDS)
+                if any(f['properties'].get('category')!=entry['categoryId'] for f in fc['features']):
+                    raise ValueError('Категория объектов не соответствует запрошенному слою контекста')
+                if len(fc['features'])>5000:raise ValueError('Слишком много объектов контекста; уменьшите область')
+                row.update(state='received',received_at=store.now(),sha256=digest,http_status=200,count=len(fc['features']),geojson=fc)
         except Exception as exc:
             row.update(checked_at=store.now(),error=str(exc)[:500])
+            if isinstance(exc,nspd.StatusError):row['http_status']=exc.status_code
+            stopped_reason='Остановлено после ошибки слоя «'+TITLES[mode]+'»: '+row['error']
+            row['stopped_reason']=stopped_reason
+        if row['state']!='received':
             prior=(previous or {}).get('layers',{}).get(mode,{}) if applicable(previous,bounds) else {}
-            if prior.get('geojson') is not None and prior.get('received_at'):
+            prior_fc=prior.get('geojson')
+            if isinstance(prior_fc,dict) and prior_fc.get('features') and prior.get('received_at'):
                 row.update({key:copy.deepcopy(prior[key]) for key in ('geojson','count','received_at','sha256') if key in prior})
                 row.update(state='retained',retained_from_context_id=previous['id'])
         layers[mode]=row
@@ -122,4 +136,4 @@ def flags(matches):
 def sources(context,bounds):
     used=applicable(context,bounds)
     return {'id':(context or {}).get('id'),'applied':used,'complete':False,'warning':WARNING,
-            'layers':{mode:({k:row.get(k) for k in ('title','state','received_at','checked_at','sha256','count','error','source','category_id','retained_from_context_id')} if used and row else {'title':TITLES[mode],'state':'not_available'}) for mode,row in ((mode,(context or {}).get('layers',{}).get(mode,{})) for mode in TITLES)}}
+            'layers':{mode:({k:row.get(k) for k in ('title','state','requested','received_at','checked_at','sha256','count','error','stopped_reason','http_status','source','category_id','retained_from_context_id')} if used and row else {'title':TITLES[mode],'state':'not_available'}) for mode,row in ((mode,(context or {}).get('layers',{}).get(mode,{})) for mode in TITLES)}}
