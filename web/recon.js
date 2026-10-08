@@ -20,7 +20,8 @@ function reconRows(rows,watch=false){
 function reconAccessText(c){
  const a=c.access_evidence;if(!a)return '';
  const distance=row=>row?areaFmt(row.distance_m)+' м':'не установлено';
- return '<br>До полученного участка: '+distance(a.nearest_parcel)+'; здания: '+distance(a.nearest_building)+'.'+(a.direct_segment?'<br>Прямой отрезок к дороге: '+areaFmt(a.direct_segment.length_m)+' м; пересечения участков: '+a.intersections.parcels.length+', зданий: '+a.intersections.buildings.length+'. Это не маршрут.':'<br>Контур дорожного назначения не получен.');
+ const gp=c.general_plan_matches?.functional||[];const codes=[...new Set(gp.map(row=>row.fields.SUBSUBTYPE).filter(code=>code!=null))];
+ return '<br>До полученного участка: '+distance(a.nearest_parcel)+'; здания: '+distance(a.nearest_building)+'.'+(a.direct_segment?'<br>Прямой отрезок к дороге: '+areaFmt(a.direct_segment.length_m)+' м; пересечения участков: '+a.intersections.parcels.length+', зданий: '+a.intersections.buildings.length+'. Это не маршрут.':'<br>Контур дорожного назначения не получен.')+(gp.length?'<br>Генплан РГИС: '+gp.length+' функциональных полигонов; коды '+codes.map(escapeHtml).join(', ')+'. Актуальность и ПЗЗ не подтверждены.':'');
 }
 function showReconCandidate(c){
  if(reconFocus)reconDraw.removeLayer(reconFocus);
@@ -49,6 +50,7 @@ async function refreshRecon(){
   for(const mode of ['parcels','buildings','restrictions'])L.geoJSON(r.map_layers[mode],{style:{color:mode==='restrictions'?'#bd4d4d':mode==='parcels'?'#87918a':'#624332',weight:1,fillOpacity:mode==='restrictions'?.04:.15,dashArray:mode==='restrictions'?'5 4':null},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   for(const mode of ['settlements','quarters','schemes','planned_parcels','red_lines','water','forests','protected','heritage'])if(r.map_layers[mode])L.geoJSON(r.map_layers[mode],{style:{color:mode==='red_lines'?'#cf3544':mode==='quarters'?'#8067aa':mode==='water'?'#4489a5':['forests','protected'].includes(mode)?'#567741':mode==='settlements'?'#4489a5':'#b05e35',weight:mode==='red_lines'?2:1,fillOpacity:.02,dashArray:'5 6'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   if(el('boundary-show').checked&&r.map_layers.historical_boundary)L.geoJSON(r.map_layers.historical_boundary,{style:{color:'#9a5a32',weight:3,fill:false,dashArray:'9 7'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
+  if(el('rgis-show').checked)for(const mode of ['functional','settlements','roads'])if(r.map_layers['rgis_'+mode])L.geoJSON(r.map_layers['rgis_'+mode],{style:{color:mode==='functional'?'#187f99':mode==='roads'?'#194da2':'#38878c',weight:2,fillOpacity:.04,dashArray:'3 5'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   for(const c of r.candidates)L.geoJSON({type:'Feature',geometry:c.geometry,properties:{}},{style:{color:c.kind==='auction'?'#893f91':c.kind==='offer'?'#318ab5':'#bc841e',weight:2,fillOpacity:.25},onEachFeature:(f,l)=>l.bindPopup(`${escapeHtml(reconNames[c.kind])} · ${areaFmt(c.area_m2)} м²<br>Правовой статус не подтверждён`)}).addTo(reconDraw);
   const [w,south,e,n]=r.bounds;reconMap.fitBounds([[south,w],[n,e]],{padding:[16,16]});
  }
@@ -68,6 +70,7 @@ reconMap.on('click',selectCorner);
 el('recon-run').addEventListener('click',runRecon);
 el('recon-kind').addEventListener('change',refreshRecon);
 el('boundary-show').addEventListener('change',refreshRecon);
+el('rgis-show').addEventListener('change',refreshRecon);
 for(const container of ['recon-results','recon-watch'])el(container).addEventListener('click',async e=>{
  const show=e.target.closest('[data-recon-show]');if(show){const c=show.dataset.reconWatchShow?reconWatch.find(r=>r.candidate.id===show.dataset.reconShow)?.candidate:reconResult?.candidates.find(c=>c.id===show.dataset.reconShow);if(c)showReconCandidate(c);return;}
  const save=e.target.closest('[data-recon-save]');if(!save||running||!reconResult)return;save.disabled=true;

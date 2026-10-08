@@ -34,7 +34,7 @@ from land import scan_cells,scan_source,scan_review
 from land import torgi_docs
 from land import georeference
 from land import torgi_visual
-from land import recon, regional_documents
+from land import recon, regional_documents, rgis_context
 
 ROOT = Path(__file__).resolve().parent
 TOKEN = secrets.token_urlsafe(32)
@@ -140,6 +140,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(data,filename='land-search-with-evidence.json' if p.path.endswith('/export') else None)
             if p.path == '/api/session':
                 return self.send({'token': TOKEN, 'app': 'land-recon'})
+            if p.path in ('/api/rgis','/api/rgis/export'):
+                attempt=store.get_setting('rgis_attempt_'+project)
+                with JOB_LOCK:active=any(j['state']=='running' and j['project']==project for j in JOBS.values())
+                if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
+                return self.send({'result':store.get_setting('rgis_context_'+project),'attempt':attempt},filename='general-plan-observations.json' if p.path.endswith('/export') else None)
             if p.path == '/api/municipal/ocr/page':
                 raw = ocr.preview(project, query.get('document', [''])[0], int(query.get('page', ['0'])[0]), int(query.get('view', ['1'])[0]))
                 return self.send(raw, content_type='image/png')
@@ -442,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Сопоставление сохранённых лотов', lambda: torgi.rematch(project, data)))
             if path == '/api/recon':
                 return self.send(launch_job(project,'Поиск контуров для разработки',lambda:recon.run(project,data)))
+            if path == '/api/rgis':
+                return self.send(launch_job(project,'Слои генплана РГИС',lambda:rgis_context.run(project,data)))
             if path == '/api/recon/watch':
                 return self.send(recon.watch(project,data))
             if path == '/api/survey/watch':

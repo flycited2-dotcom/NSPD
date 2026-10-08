@@ -104,6 +104,25 @@ def test_recon_page_serves_new_workflow(server):
     with request(server,'/recon.js') as response:assert b'/api/recon/watch' in response.read()
 
 
+def test_rgis_source_route_preserves_context_and_protects_refresh(server,monkeypatch):
+    import time
+    old={'id':'dated','warning':'not PZZ'};store.set_setting('rgis_context_trudovoe',old)
+    store.set_setting('rgis_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/rgis/export') as response:
+        data=json.load(response)
+        assert 'general-plan-observations.json' in response.headers['Content-Disposition']
+    assert data['result']==old and data['attempt']['state']=='interrupted'
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/rgis',{'bounds':[]},token=False)
+    assert error.value.code==403 and store.get_setting('rgis_context_trudovoe')==old
+    monkeypatch.setattr(app.rgis_context,'run',lambda project,params:{'id':'new','counts':{'functional':8}})
+    with request(server,'/api/rgis',{'bounds':[34.2,44.99,34.21,45]}) as response:job_id=json.load(response)['job_id']
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done' and job['result']['counts']['functional']==8
+
+
 def test_pzz_full_text_routes_and_token_protection(server, monkeypatch):
     import time
     with request(server, '/api/planning/regulations') as response:
