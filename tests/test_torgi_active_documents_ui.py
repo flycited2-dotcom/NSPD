@@ -27,6 +27,7 @@ function element(id){
 }
 const selector=element('regional-doc-lot');selector.value=A;
 const buttons=['collect','read','reprocess','ocr'].map(name=>element('regional-doc-'+name));
+const save=element('recon-save');buttons.push(save);
 const waiting=[],posts=[];let race=true,reconRefreshes=0;
 function card(id){return {lot_id:id,state:'received',attachments:[],lot_url:'https://torgi.gov.ru/example',received_at:'observed-date',card_status:'PUBLISHED'}}
 function response(id,chosen){
@@ -46,7 +47,8 @@ async function api(url,args){
  return new Promise(resolve=>waiting.push({url,resolve}));
 }
 const context=vm.createContext({
- el:element,api,running:false,document:{querySelectorAll(){return buttons}},
+ el:element,api,running:false,reconStale:false,sameReconBounds:()=>true,
+ document:{querySelectorAll(selector){return selector==='[data-recon-save]'?[save]:buttons}},
  escapeHtml:value=>String(value??''),tdate:value=>String(value??''),statusName:value=>value,
  operationState:value=>value,docErrorText:value=>value,
  refreshRecon:async()=>{reconRefreshes++},
@@ -80,6 +82,14 @@ const drain=()=>new Promise(resolve=>setImmediate(resolve));
  assert.equal(selector.value,B);assert.equal(selector.disabled,false);
  assert.equal(reconRefreshes,1);
  assert.ok(buttons.every(button=>!button.disabled));
+ // Finishing another job must not reactivate saving an outdated result.
+ context.reconStale=true;
+ await element('regional-doc-read').listeners.click();
+ assert.equal(save.disabled,true);
+ assert.ok(buttons.filter(button=>button!==save).every(button=>!button.disabled));
+ context.reconStale=false;context.sameReconBounds=()=>false;
+ await element('regional-doc-read').listeners.click();
+ assert.equal(save.disabled,true,'A result from another area cannot be saved');
 })().catch(error=>{console.error(error);process.exitCode=1});
 '''
     options={'creationflags':subprocess.CREATE_NO_WINDOW} if sys.platform=='win32' else {}

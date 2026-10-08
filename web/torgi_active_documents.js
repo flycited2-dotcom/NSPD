@@ -39,7 +39,7 @@ async function runRegionalDocs(action='collect'){
   if(state.state==='error')throw Error(state.error);
   await refreshRecon();
  }catch(e){el('regional-doc-status').textContent+=' Не завершено: '+e.message}
- finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);el('regional-doc-lot').disabled=false}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);el('regional-doc-lot').disabled=false;if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
 }
 el('regional-doc-collect').addEventListener('click',()=>runRegionalDocs());
 el('regional-doc-read').addEventListener('click',()=>runRegionalDocs('read'));

@@ -1,6 +1,8 @@
 'use strict';
-async function refreshRgis(){
- const d=await api('/api/rgis'),r=d.result,a=d.attempt;
+let rgisStatusData=null;
+function drawRgisStatus(){
+ if(!rgisStatusData)return;
+ const d=rgisStatusData,r=d.result,a=d.attempt;
  let text=a?`Последняя проверка РГИС: ${a.state==='done'?'завершена':a.state==='running'?'выполняется':a.state==='interrupted'?'прервана':'ошибка'}${a.error?' · '+a.error:''}. `:'';
  if(r){
   const same=r.bounds.every((value,i)=>Math.abs(value-boundsInput()[i])<1e-9);
@@ -10,6 +12,10 @@ async function refreshRgis(){
   text+=r.warning+' После обновления пересчитайте контуры; можно отключить сетевые обновления НСПД и торгов.';
  }else text+='Генплан РГИС ещё не получен. Это отдельный источник; действующие территориальные зоны ПЗЗ он не подтверждает.';
  el('rgis-status').textContent=text;
+}
+async function refreshRgis(){
+ rgisStatusData=await api('/api/rgis');
+ drawRgisStatus();
 }
 el('rgis-run').addEventListener('click',async()=>{
  if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);

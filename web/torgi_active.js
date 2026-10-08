@@ -33,7 +33,7 @@ async function runRegionalTorgi(action=''){
   if(state.state==='error')throw Error(state.error);
   await refreshRecon();
  }catch(e){el('torgi-active-status').textContent+=' Не выполнено: '+e.message}
- finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
 }
 el('torgi-active-run').addEventListener('click',()=>runRegionalTorgi());
 el('torgi-active-locate').addEventListener('click',()=>runRegionalTorgi('geometry'));
