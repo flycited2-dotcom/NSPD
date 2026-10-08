@@ -4,12 +4,13 @@ from shapely.geometry import Polygon
 from shapely.validation import explain_validity
 from .torgi import canonical
 
+PDF_ALGORITHM = 'torgi-file-text-v3'
 SHEET = re.compile(r'Лист\s*№\s*(\d+)\s+раздела\s+3\.2\s+Всего\s+листов\s+раздела\s+3\.2:\s*(\d+)', re.I)
 CAD = re.compile(r'^Кадастровый\s+номер:\s*(\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10})', re.I | re.M)
 TITLE = 'Сведения о характерных точках границы земельного участка'
 HEADER = re.compile(r'Координаты,\s*м\b[\s\S]*?X\s+Y\s*\n\s*1\s+2\s+3\s+4\s+5\s*\n', re.I)
 VALUE = r'-?\d{1,8}(?:[,.]\d{1,3})?'
-ROW = re.compile(rf'^(\d+)\s+({VALUE})\s+({VALUE})\s+(закрепление\s+отсутствует)\s+(\d+(?:[,.]\d{{1,3}})?)$', re.I)
+ROW = re.compile(rf'^(\d+)\s+({VALUE})\s+({VALUE})\s+(закрепление\s+отсутствует|-)\s+(\d+(?:[,.]\d{{1,3}})?)$', re.I)
 
 
 def extract(pages):
@@ -25,6 +26,7 @@ def extract(pages):
         if not 1 <= total <= 40:
             raise ValueError('Раздел координат ЕГРН превышает лимит листов')
         issues, points, source_pages, cad_numbers, crs_labels = [], [], [], set(), set()
+        closure_seen = False
         for offset in range(total):
             if position + offset >= len(pages):
                 issues.append({'reason': 'Листы раздела 3.2 получены не полностью'})
@@ -48,23 +50,34 @@ def extract(pages):
                 body = body[header.end():]
             rows_on_page = 0
             started = False
+            rows_ended = False
             for line in body.splitlines():
                 value = line.strip()
                 if not value:
                     continue
                 match = ROW.fullmatch(value)
                 if not match:
-                    if re.match(r'^\d+\s+[-\d]', value):
+                    if (re.match(r'^\d+\s+[-\d]', value)
+                            or re.match(rf'^\S+\s+{VALUE}\s+{VALUE}(?:\s|$)', value)):
                         issues.append({'page': number, 'reason': 'Неподдержанная строка пятистолбцовой таблицы', 'row': value[:200]})
                     if started:
-                        break  # the observed footer follows rows; no numbers are read from it
+                        rows_ended = True
+                    continue
+                if rows_ended:
+                    issues.append({'page': number, 'reason': 'Координаты после разделителя таблицы; продолжение не установлено', 'row': value[:200]})
                     continue
                 started = True
                 x, y, accuracy = [float(v.replace(',', '.')) for v in (match[2], match[3], match[5])]
-                if int(match[1]) != len(points) + 1:
+                repeat_first = (len(points) >= 3 and match[1] == points[0]['label']
+                                and (x, y) == (points[0]['x'], points[0]['y']))
+                if closure_seen:
+                    issues.append({'page': number, 'reason': 'Строки после явного замыкания; части не объединены'})
+                if int(match[1]) != len(points) + 1 and not repeat_first:
                     issues.append({'page': number, 'reason': 'Нарушен последовательный номер точки'})
                 points.append({'label': match[1], 'x': x, 'y': y, 'page': number,
-                               'accuracy_stated_m': accuracy, 'source_row': value})
+                               'mark_description': match[4], 'accuracy_stated_m': accuracy, 'source_row': value})
+                if len(points) >= 4 and (x, y) == (points[0]['x'], points[0]['y']):
+                    closure_seen = True
                 consumed.add((number, value))
                 rows_on_page += 1
                 if len(points) > 5000:

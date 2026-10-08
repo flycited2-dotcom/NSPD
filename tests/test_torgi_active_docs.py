@@ -261,3 +261,126 @@ def test_fresh_regional_cards_reuse_same_file_evidence_without_borrowing_histori
     assert result['search_created_at']=='fresh-query-date'
     assert next(iter(result['files'].values()))['received_at']=='regional-file-date'
     assert store.get_setting('torgi_documents_trudovoe')==historical
+
+
+def lot_catalog(search):
+    raw=b'%PDF-1.4\nlot evidence'
+    def attachment(letter, name, **updates):
+        return {'fileId':letter*24, 'fileName':name, 'fileSize':len(raw), **updates}
+    chosen=lot(3); other=lot(1,'90:11'); shared=lot(4)
+    revised={**search, 'lots':[*search['lots'], shared]}
+    store.set_setting('torgi_active_trudovoe', revised)
+    notice=attachment('c','shared_scheme.pdf')
+    partly_inactive=attachment('e','notice_inactive_for_selected.pdf')
+    cards=[docs.normalize_card(card(chosen,
+        lotAttachments=[attachment('a','selected.pdf')],
+        noticeAttachments=[notice, {**partly_inactive, 'inactive':True}]), chosen),
+        docs.normalize_card(card(shared, noticeAttachments=[notice]), shared),
+        docs.normalize_card(card(other, lotAttachments=[attachment('b','other.pdf')],
+            noticeAttachments=[attachment('d','same_notice_number.pdf'), partly_inactive]), other)]
+    result=active_catalog(cards=cards, files=docs.files_for(cards,{}))
+    return raw, result, revised
+
+
+def test_read_one_regional_lot_uses_only_explicit_active_associations(db, monkeypatch):
+    _, historical, search=db
+    raw, old, _=lot_catalog(search)
+    calls=[]
+    def fetch(url, **kwargs):
+        calls.append(url);return raw, 'application/pdf', 200
+    monkeypatch.setattr(docs, 'fetch', fetch)
+    monkeypatch.setattr(docs, 'extract_file', lambda path,digest,fmt:
+                        {'sha256':digest, 'algorithm':docs.ALGORITHM, 'georeferenced':False})
+    outcome=docs.read('trudovoe', {'id':old['id'], 'lot_id':lot(3)['id']}, active=True)
+    current=store.get_setting('torgi_active_documents_trudovoe')
+    assert outcome['processed']==2 and outcome['remaining']==0 and outcome['lot_id']==lot(3)['id']
+    assert set(calls)=={docs.FILE+'a'*24, docs.FILE+'c'*24}
+    for key, file in old['files'].items():
+        if file['file_id'][0] in ('a','c'):
+            assert current['files'][key]['state']=='read' and not current['files'][key]['geometry_confirmed']
+        else:
+            assert current['files'][key]==file
+    notice=next(file for file in current['files'].values() if file['file_id']=='c'*24)
+    assert {association['lot_id'] for association in notice['associations']}=={lot(3)['id'],lot(4)['id']}
+    assert all(association['scope']=='notice' for association in notice['associations'])
+    assert len(docs.file_queue(current))==3  # Other lots retain their own pending work.
+    assert current['search_created_at']=='publication-query-date'
+    assert store.get_setting('torgi_active_files_attempt_trudovoe')['lot_id']==lot(3)['id']
+    assert store.get_setting('torgi_documents_trudovoe')==historical
+
+
+@pytest.mark.parametrize('operation', [docs.read,docs.reprocess])
+@pytest.mark.parametrize('reason', ['unknown','debtor','missing_card','error_card','stale_catalog','bad_id'])
+def test_selected_lot_must_belong_to_fresh_zk_search_and_accepted_card(db, monkeypatch, operation, reason):
+    _, historical, search=db
+    _, old, _=lot_catalog(search)
+    requested=lot(3)['id']
+    if reason=='unknown':requested=lot(99)['id']
+    elif reason=='debtor':
+        requested=lot(2)['id']
+        old['cards'].append(docs.normalize_card(card(lot(2)), lot(2)))
+    elif reason=='missing_card':old['cards']=[card for card in old['cards'] if card['lot_id']!=requested]
+    elif reason=='error_card':
+        next(card for card in old['cards'] if card['lot_id']==requested)['state']='error'
+    elif reason=='stale_catalog':old['search_source_id']='previous-source'
+    elif reason=='bad_id':requested='../file'
+    store.set_setting('torgi_active_documents_trudovoe',old)
+    monkeypatch.setattr(docs, 'fetch', lambda *args,**kwargs:pytest.fail('Invalid selection must fail before network'))
+    monkeypatch.setattr(docs, 'extract_file', lambda *args,**kwargs:pytest.fail('Invalid selection must fail before parsing'))
+    with pytest.raises(ValueError):operation('trudovoe', {'id':old['id'],'lot_id':requested}, active=True)
+    assert store.get_setting('torgi_active_documents_trudovoe')==old
+    assert store.get_setting('torgi_active_files_attempt_trudovoe') is None
+    assert store.get_setting('torgi_active_reprocess_attempt_trudovoe') is None
+    assert store.get_setting('torgi_documents_trudovoe')==historical
+
+
+def test_selected_lot_network_error_does_not_continue_to_another_attachment(db, monkeypatch):
+    _, _, search=db
+    _, old, _=lot_catalog(search)
+    calls=[]
+    def fetch(url,**kwargs):
+        calls.append(url);raise ValueError('HTTP 403')
+    monkeypatch.setattr(docs, 'fetch', fetch)
+    outcome=docs.read('trudovoe', {'id':old['id'],'lot_id':lot(3)['id']}, active=True)
+    current=store.get_setting('torgi_active_documents_trudovoe')
+    assert outcome['state']=='partial' and len(calls)==1 and outcome['remaining']==1
+    assert sum(file['state']=='error' for file in current['files'].values())==1
+    assert sum(file['state']=='pending' for file in current['files'].values())==4
+    for key, file in old['files'].items():
+        if file['file_id'][0] not in ('a','c'):assert current['files'][key]==file
+
+
+def test_reprocess_one_lot_preserves_other_evidence_and_source_dates(db, monkeypatch):
+    path, _, search=db
+    raw, old, _=lot_catalog(search)
+    digest=hashlib.sha256(raw).hexdigest()
+    folder=path/'torgi_documents';folder.mkdir();(folder/(digest+'.pdf')).write_bytes(raw)
+    for file in old['files'].values():
+        file.update(state='read', algorithm='previous-parser', sha256=digest, received_at='original-file-date')
+    store.set_setting('torgi_active_documents_trudovoe',old)
+    calls=[]
+    def extract(*args):
+        calls.append(args);return {'sha256':digest, 'algorithm':docs.ALGORITHM, 'georeferenced':False}
+    monkeypatch.setattr(docs, 'extract_file', extract)
+    monkeypatch.setattr(docs, 'fetch', lambda *args,**kwargs:pytest.fail('Reprocessing must stay offline'))
+    outcome=docs.reprocess('trudovoe', {'id':old['id'],'lot_id':lot(3)['id']}, active=True)
+    current=store.get_setting('torgi_active_documents_trudovoe')
+    assert outcome['processed']==2 and outcome['remaining']==0 and outcome['network_requests']==0
+    assert len(calls)==2 and len(docs.reprocess_queue(current))==3
+    for key, file in old['files'].items():
+        updated=current['files'][key]
+        assert updated['received_at']=='original-file-date'
+        if file['file_id'][0] not in ('a','c'):assert updated==file
+
+
+@pytest.mark.parametrize('operation', [docs.read,docs.reprocess])
+def test_historical_catalog_rejects_lot_parameter_and_keeps_existing_general_mode(db, monkeypatch, operation):
+    _, historical, _=db
+    monkeypatch.setattr(docs, 'fetch', lambda *args,**kwargs:pytest.fail('No source request expected'))
+    with pytest.raises(ValueError,match='регионального'):
+        operation('trudovoe', {'id':historical['id'],'lot_id':lot(3)['id']})
+    assert store.get_setting('torgi_documents_trudovoe')==historical
+    # Use an empty valid historical queue to confirm the established mode without lot_id.
+    historical={**historical,'files':{}}
+    store.set_setting('torgi_documents_trudovoe',historical)
+    assert operation('trudovoe', {'id':historical['id']})['processed']==0

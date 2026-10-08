@@ -64,3 +64,52 @@ def test_pdf_worker_reports_egrn_and_leaves_other_coordinate_pages_visible(monke
     result,_=torgi_file_worker.extract(b'local','pdf')
     assert len(result['egrn_tables'])==1 and result['egrn_tables'][0]['state']=='review_required'
     assert result['unparsed_coordinate_pages']==[10] and not result['georeferenced']
+
+
+@pytest.mark.parametrize('mark',['-', 'закрепление отсутствует'])
+@pytest.mark.parametrize('closing_label',['1','5'])
+def test_printed_mark_and_two_explicit_closure_numberings(mark, closing_label):
+    p=[(n,text.replace('закрепление отсутствует',mark)
+        .replace('5 5000000.00 4300000.00',closing_label+' 5000000.00 4300000.00')) for n,text in pages()]
+    t=extract(p)[0][0]
+    assert t['state']=='review_required' and t['local_area_m2']==400
+    assert t['points'][-1]['label']==closing_label
+    assert all(point['mark_description']==mark for point in t['points'])
+    assert not t['georeferenced'] and not t['geometry_confirmed']
+
+
+@pytest.mark.parametrize('last_rows',[
+    END.replace('5 5000000.00 4300000.00','1 5000000.00 4300001.00'),
+    END.replace('4 5000000.00 4300020.00','1 5000000.00 4300020.00'),
+    END+'6 5000010.00 4300010.00 закрепление отсутствует 0.1\n',
+    END.replace('5 5000000.00 4300000.00','1 5000000.00 4300000.00')+'2 5000020.00 4300000.00 закрепление отсутствует 0.1\n',
+])
+def test_restarted_numbering_or_points_after_closure_rejected(last_rows):
+    p=pages();p[1]=(9,last_rows+META.format(sheet=2,total=2,cad='90:11:110501:2843'))
+    t=extract(p)[0][0]
+    assert t['state']=='rejected' and t['outline_xy'] is None
+
+
+def test_observed_single_sheet_dash_table_retains_precision_and_first_label():
+    rows='''1 4991177.93 5255458.54 - 2.5
+2 4991167.61 5255757.96 - 2.5
+3 4990755.44 5255756.88 - 2.5
+4 4990761.48 5255419.48 - 2.5
+5 4991152.98 5255431.86 - 2.5
+1 4991177.93 5255458.54 - 2.5
+'''
+    t=extract([(8,TITLE.replace('зона 4','зона 5')+HEADER+rows+
+                  META.format(sheet=1,total=1,cad='90:13:050601:2239'))])[0][0]
+    assert t['state']=='review_required' and len(t['points'])==6
+    assert t['points'][0]['source_row']==rows.splitlines()[0]
+    assert t['cadastral_number']=='90:13:50601:2239' and t['crs_label']=='СК-63, зона 5'
+    assert t['outline_xy'][0]==[4991177.93,5255458.54] and t['outline_xy'][-1]==t['outline_xy'][0]
+    assert t['crs_status']=='parameters_missing' and not t['georeferenced']
+
+
+@pytest.mark.parametrize('separator',['Продолжение таблицы\n', ''])
+@pytest.mark.parametrize('label',['4', 'н4'])
+def test_coordinates_after_separator_or_unsupported_label_cannot_hide_second_part(separator,label):
+    rows=ROWS+'1 5000000.00 4300000.00 - 0.1\n'+separator+label+' 5000000.00 4300020.00 - 0.1\n1 5000000.00 4300000.00 - 0.1\n'
+    t=extract([(8,TITLE+HEADER+rows+META.format(sheet=1,total=1,cad='90:11:110501:2843'))])[0][0]
+    assert t['state']=='rejected' and t['outline_xy'] is None and t['issues']

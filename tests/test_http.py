@@ -532,6 +532,22 @@ def test_regional_document_http_routes_are_isolated_and_protected(server,monkeyp
     assert b'/torgi_active_documents.js' in html and b'torgi-active-group' in html
 
 
+def test_regional_document_get_selection_counts_only_explicit_lot_files(server):
+    from test_torgi_active_docs import lot_catalog, lot
+    search={'id':'active-search','search_source_id':'active-source','created_at':'publication-query-date','lots':[lot(1,'90:11'),lot(2),lot(3)]}
+    _,catalog,_=lot_catalog(search)
+    with request(server,'/api/torgi/active/documents?lot_id='+lot(3)['id']) as response:
+        body=json.load(response)
+    assert body['selected_lot_id']==lot(3)['id'] and body['selected_files_remaining']==2
+    assert body['files_remaining']==5 and body['selected_files_to_reprocess']==0
+    assert next(lot for lot in body['comparison_lots'] if lot['id']==body['selected_lot_id'])['cadastral_numbers']==lot(3)['cadastral_numbers']
+    assert store.get_setting('torgi_active_documents_trudovoe')==catalog
+    for path in ('/api/torgi/active/documents?lot_id='+lot(99)['id'],
+                 '/api/torgi/documents?lot_id='+lot(3)['id']):
+        with pytest.raises(urllib.error.HTTPError) as error:request(server,path)
+        assert error.value.code==400
+
+
 def test_torgi_local_reprocess_export_queue_and_post_guard(server):
     store.set_setting('torgi_trudovoe',{'id':'search','created_at':'date','lots':[]})
     store.set_setting('torgi_documents_trudovoe',{'id':'docs','search_id':'search','search_created_at':'date','cards':[],

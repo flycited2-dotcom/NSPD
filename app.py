@@ -197,7 +197,15 @@ class Handler(BaseHTTPRequestHandler):
                 if reprocessing and reprocessing['state']=='running' and not active:reprocessing=dict(reprocessing,state='interrupted')
                 if visual and visual['state']=='running' and not active:visual=dict(visual,state='interrupted')
                 same = torgi_docs.same_search(search,result)
+                selected = None
+                if 'lot_id' in query:
+                    if not same:raise ValueError('Поиск изменился; обновите карточки перед выбором лота')
+                    selected = torgi_docs.selected_lot({'lot_id':query['lot_id'][0]},search,result,regional)
                 return self.send({'result':result,'attempt':attempt,'reading_attempt':reading,'reprocess_attempt':reprocessing,'current_search_id':(search or {}).get('id'),
+                                  'comparison_lots':[{'id':lot['id'],'cadastral_numbers':lot.get('cadastral_numbers',[])} for lot in (search or {}).get('lots',[]) if lot['id'] in {card['lot_id'] for card in (result or {}).get('cards',[])}] if same else [],
+                                  'selected_lot_id':selected,
+                                  'selected_files_remaining':len(torgi_docs.files_for_lot(torgi_docs.file_queue(result or {}),selected)) if selected else None,
+                                  'selected_files_to_reprocess':len(torgi_docs.files_for_lot(torgi_docs.reprocess_queue(result or {}),selected)) if selected else None,
                                   'current_search_source_id':torgi.source_id(search),'search_stale':bool(result and not same),
                                   'visual_attempt':visual,'visual_remaining':len(torgi_visual.queue(result or {})),
                                   'cards_remaining':len(torgi_docs.metadata_queue(search,result if same else {},active=regional,survey=store.get_setting('survey_'+project))) if search else 0,

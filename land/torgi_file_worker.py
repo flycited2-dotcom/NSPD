@@ -52,7 +52,7 @@ def main():
             png,_=image_evidence.preview(raw,fmt)
             path.with_suffix('.preview.png').write_bytes(png)
         else:path.with_suffix('.txt').write_text('\n'.join(f'UNIT {n}\n{text}' for n,text in pages),encoding='utf-8')
-        algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else 'torgi-file-text-v2'
+        algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else egrn_coordinates.PDF_ALGORITHM
         print(json.dumps({**result,'sha256':digest,'algorithm':algorithm},ensure_ascii=False))
     except Exception as exc:
         print(json.dumps({'error':str(exc)[:500]},ensure_ascii=False));raise SystemExit(1)

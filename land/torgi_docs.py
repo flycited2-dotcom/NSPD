@@ -12,6 +12,7 @@ from .network import fetch, ResponseTooLarge
 from .docx_text import ALGORITHM as DOCX_ALGORITHM
 from . import image_evidence
 from .legacy_text import ALGORITHM as LEGACY_ALGORITHM, OLE_MAGIC
+from .egrn_coordinates import PDF_ALGORITHM as ALGORITHM
 
 CARD = 'https://torgi.gov.ru/new/api/public/lotcards/'
 FILE = 'https://torgi.gov.ru/new/file-store/v1/'
@@ -19,7 +20,6 @@ BATCH = 5
 MAX_BYTES = 8*1024*1024
 PDF_MAX_BYTES = 16*1024*1024
 READ_FORMATS = ('pdf','docx','doc','rtf',*image_evidence.FORMATS)
-ALGORITHM = 'torgi-file-text-v2'
 
 
 def setting_key(project, active=False, suffix=''):
@@ -154,6 +154,28 @@ def file_queue(result,retry=False):
                   key=lambda f: (0 if retry and f['state']=='error' else 1, priority(f)))
 
 
+def selected_lot(params, search, result, active=False):
+    if 'lot_id' not in params:return None
+    lot_id=params['lot_id']
+    if not active or not isinstance(lot_id,str) or not re.fullmatch(r'\d{10,30}_\d{1,6}',lot_id):
+        raise ValueError('Выбор лота доступен только для регионального каталога; требуется корректный lot_id')
+    lots=[lot for lot in search.get('lots',[]) if lot.get('id')==lot_id
+          and (lot.get('type') or {}).get('code')=='ZK']
+    if len(lots)!=1 or not any(card.get('lot_id')==lot_id and card.get('state')=='received'
+                              and card.get('notice_number')==lots[0].get('notice_number')
+                              for card in result.get('cards',[])):
+        raise ValueError('Лот ЗК или его принятая карточка отсутствуют в текущем поиске/каталоге')
+    return lot_id
+
+
+def files_for_lot(files, lot_id):
+    if lot_id is None:return files
+    # Notice files are shared only through the explicit associations of accepted cards.
+    return [file for file in files if file.get('eligible') and any(
+        association.get('lot_id')==lot_id and association.get('scope') in ('lot','notice')
+        and not association.get('inactive',False) for association in file.get('associations',[]))]
+
+
 def persist(project,result,active=False):
     result['updated_at']=store.now()
     result['id']=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()[:20]
@@ -179,8 +201,10 @@ def reprocess(project,params,active=False):
     search=store.get_setting(torgi.setting_key(project,active))
     if not old or params.get('id')!=old['id'] or not same_search(search,old):
         raise ValueError('Каталог документов/поиск изменился; обновите страницу')
-    result=copy.deepcopy(old);selected=reprocess_queue(result)[:BATCH];catalog_id=old['id']
+    lot_id=selected_lot(params,search,old,active)
+    result=copy.deepcopy(old);selected=files_for_lot(reprocess_queue(result),lot_id)[:BATCH];catalog_id=old['id']
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0}
+    if lot_id is not None:attempt['lot_id']=lot_id
     attempt_key=torgi.setting_key(project,active,'_reprocess_attempt')
     store.set_setting(attempt_key,attempt)
     try:
@@ -203,10 +227,11 @@ def reprocess(project,params,active=False):
             attempt['processed']+=1;catalog_id=persist_current(project,result,search,catalog_id,active)
             store.set_setting(attempt_key,attempt)
         catalog_id=persist_current(project,result,search,catalog_id,active)
-        attempt.update(state='done',finished_at=store.now(),remaining=len(reprocess_queue(result)))
+        attempt.update(state='done',finished_at=store.now(),remaining=len(files_for_lot(reprocess_queue(result),lot_id)))
         with store.connect() as db:
             store.event(db,project,'torgi_reprocess',{'id':result['id'],'files':attempt['processed'],'network_requests':0})
-        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'network_requests':0}
+        return {'processed':attempt['processed'],'remaining':attempt['remaining'],'network_requests':0,
+                **({'lot_id':lot_id} if lot_id is not None else {})}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
     finally:store.set_setting(attempt_key,attempt)
@@ -291,8 +316,10 @@ def read(project,params,active=False):
         raise ValueError('Каталог документов/поиск изменился; сначала загрузите карточки')
     retry=params.get('retry_errors',False)
     if not isinstance(retry,bool):raise ValueError('Параметр повтора должен быть логическим')
-    result=copy.deepcopy(old);selected=file_queue(result,retry)[:BATCH];catalog_id=old['id']
+    lot_id=selected_lot(params,search,old,active)
+    result=copy.deepcopy(old);selected=files_for_lot(file_queue(result,retry),lot_id)[:BATCH];catalog_id=old['id']
     attempt={'state':'running','started_at':store.now(),'processed':0,'requested':len(selected),'network_requests':0,'cached_files':0}
+    if lot_id is not None:attempt['lot_id']=lot_id
     attempt_key=torgi.setting_key(project,active,'_files_attempt')
     store.set_setting(attempt_key,attempt)
     folder=store.DATA/'torgi_documents';folder.mkdir(exist_ok=True)
@@ -334,11 +361,12 @@ def read(project,params,active=False):
             store.set_setting(attempt_key,attempt);time.sleep(2)
         catalog_id=persist_current(project,result,search,catalog_id,active)
         if attempt['state']=='running':attempt['state']='done'
-        attempt.update(finished_at=store.now(),remaining=len(file_queue(result)))
+        attempt.update(finished_at=store.now(),remaining=len(files_for_lot(file_queue(result),lot_id)))
         with store.connect() as db:store.event(db,project,'torgi_files',{'id':result['id'],'files':attempt['processed'],'state':attempt['state'],
                                                                   'network_requests':attempt['network_requests'],'cached_files':attempt['cached_files']})
         return {'processed':attempt['processed'],'remaining':attempt['remaining'],'state':attempt['state'],
-                'network_requests':attempt['network_requests'],'cached_files':attempt['cached_files']}
+                'network_requests':attempt['network_requests'],'cached_files':attempt['cached_files'],
+                **({'lot_id':lot_id} if lot_id is not None else {})}
     except Exception as exc:
         attempt.update(state='error',error=str(exc)[:500],finished_at=store.now());raise
     finally:store.set_setting(attempt_key,attempt)
