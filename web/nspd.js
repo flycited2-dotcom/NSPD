@@ -14,6 +14,7 @@ function drawArea(){
  if([w,s,e,n].every(Number.isFinite)&&w<e&&s<n)areaOutline=L.rectangle([[s,w],[n,e]],{color:'#b07925',weight:2,dashArray:'7 5',fillOpacity:0,interactive:false}).addTo(nmap);
  if(typeof drawReconArea==='function')drawReconArea();
  if(typeof drawRgisStatus==='function')drawRgisStatus();
+ if(typeof drawPzzStatus==='function')drawPzzStatus();
 }
 function stopSelection(){selecting=false;firstCorner=null;if(cornerMarker){selectionMap.removeLayer(cornerMarker);cornerMarker=null}el('select-area').textContent='Выделить область: 2 угла';if(el('recon-select'))el('recon-select').textContent='Выделить область';selectionMap.getContainer().style.cursor='';}
 function startSelection(map,button){if(selecting&&selectionMap===map){stopSelection();el('area-status').textContent='Выделение отменено.';return}stopSelection();selectionMap=map;selecting=true;button.textContent='Отменить выделение';el('area-status').textContent='Нажмите первый угол, затем противоположный. Двигать карту можно как обычно.';map.getContainer().style.cursor='crosshair';}

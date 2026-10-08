@@ -123,6 +123,26 @@ def test_rgis_source_route_preserves_context_and_protects_refresh(server,monkeyp
     assert job['state']=='done' and job['result']['counts']['functional']==8
 
 
+def test_regional_pzz_route_exports_dated_result_and_requires_local_token(server,monkeypatch):
+    import time
+    old={'id':'dated-pzz','layer':{'count':0},'coverage_confirmed':False}
+    store.set_setting('pzz_context_trudovoe',old)
+    store.set_setting('pzz_attempt_trudovoe',{'state':'running'})
+    with request(server,'/api/pzz/export') as response:
+        data=json.load(response)
+        assert 'regional-pzz-observations.json' in response.headers['Content-Disposition']
+    assert data['result']==old and data['attempt']['state']=='interrupted'
+    with pytest.raises(urllib.error.HTTPError) as error:request(server,'/api/pzz',{'bounds':[]},token=False)
+    assert error.value.code==403 and store.get_setting('pzz_context_trudovoe')==old
+    monkeypatch.setattr(app.pzz_context,'run',lambda project,params:{'id':'fresh-pzz','count':0})
+    with request(server,'/api/pzz',{'bounds':[34.2,44.99,34.21,45]}) as response:job_id=json.load(response)['job_id']
+    for _ in range(30):
+        with request(server,'/api/jobs/'+job_id) as response:job=json.load(response)
+        if job['state']!='running':break
+        time.sleep(.01)
+    assert job['state']=='done' and job['result']=={'id':'fresh-pzz','count':0}
+
+
 def test_pzz_full_text_routes_and_token_protection(server, monkeypatch):
     import time
     with request(server, '/api/planning/regulations') as response:

@@ -13,13 +13,13 @@ from shapely.ops import unary_union
 from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations, planning_enquiry
 from .geometry import convert, polygons
 from .review import CHECKS
-from . import regional_documents, access_evidence, rgis_context
+from . import regional_documents, access_evidence, rgis_context, pzz_context
 
-VERSION=11
-KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context')
+VERSION=12
+KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context','pzz_context')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
-HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru'}
+HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru','rgis.rk.gov.ru'}
 
 
 def options(params):
@@ -160,6 +160,7 @@ def build(values,params):
     s=values['survey'];metric=metric_for(s['bounds']);boundary=box(*s['bounds'])
     context=values.get('nspd_context');entries=nspd_context.projected(context,s['bounds'],metric)
     rgis=values.get('rgis_context');rgis_entries=rgis_context.projected(rgis,s['bounds'],metric)
+    regional_pzz=values.get('pzz_context');pzz_entries=pzz_context.projected(regional_pzz,s['bounds'],metric)
     historical=values.get('planning_boundary');historical_geometries=planning_boundary.projected(historical,metric)
     excluded_modes=('schemes','planned_parcels') if params.get('avoid_planned',True) else ()
     if params.get('avoid_environment',True):excluded_modes+=nspd_context.ENVIRONMENT
@@ -253,6 +254,7 @@ def build(values,params):
         candidate['land_status']=land_status.assessment(candidate,values)
         candidate['access_evidence']=access_evidence.assessment_prepared(candidate,access_source)
         candidate['general_plan_matches']=rgis_context.relate(convert(shape(candidate['geometry']),4326,metric),rgis_entries,rgis)
+        candidate['regional_pzz_matches']=pzz_context.relate(convert(shape(candidate['geometry']),4326,metric),pzz_entries,regional_pzz)
     source_numbers={n for lot in (source or {}).get('lots',[]) for n in lot['cadastral_numbers']}
     active_numbers={n for lot in (active_source or {}).get('lots',[]) for n in lot['cadastral_numbers']}
     sources={'nspd':{mode:{key:copy.deepcopy(layer.get(key)) for key in ('source','sha256','sha256_kind','received_at','coverage','observations')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
@@ -288,7 +290,8 @@ def build(values,params):
                                                'all_observed_pages_received':(historical or {}).get('history',{}).get('all_observed_pages_received',False),
                                                'scope':(historical or {}).get('history',{}).get('scope'),'complete':False}},
              'context':nspd_context.sources(context,s['bounds']),
-             'rgis_context':rgis_context.sources(rgis,s['bounds'])}
+             'rgis_context':rgis_context.sources(rgis,s['bounds']),
+             'pzz_context':pzz_context.sources(regional_pzz,s['bounds'])}
     map_layers={mode:{'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':f['geometry'],'properties':{'label':public_fields(f).get('cad_num',str(f['id']))}} for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]} for mode in ('parcels','buildings','restrictions')}
     for mode,records in entries.items():
         map_layers[mode]={'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':mapping(shape(f['geometry']).intersection(boundary)),
@@ -304,6 +307,11 @@ def build(values,params):
             'properties':{'label':rgis_context.TITLES[mode]+' · '+str(f['properties'].get('SUBSUBTYPE') or f['id'])+' · карта ГП 2019; актуальность и ПЗЗ не подтверждены',
                           'currentness_confirmed':False,'used_for_exclusion':False}}
             for _,f in records if not shape(f['geometry']).intersection(boundary).is_empty]}
+    map_layers['regional_pzz']={'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],
+        'geometry':mapping(shape(f['geometry']).intersection(boundary)),
+        'properties':{'label':'ПЗЗ РГИС · '+str(f['properties'].get('symbol') or f['id'])+' · '+str(f['properties'].get('territorialzonename') or '')+' · действующая редакция и допустимость использования не подтверждены',
+                      'currentness_confirmed':False,'used_for_exclusion':False}}
+        for _,f in pzz_entries if not shape(f['geometry']).intersection(boundary).is_empty]}
     return {'created_at':store.now(),'version':VERSION,'survey_id':s['id'],'source_inputs':identities(values),'bounds':s['bounds'],
             'parameters':params,'sources':sources,'candidates':candidates,'layout':layout,'warning':WARNING,
             'map_layers':map_layers,
@@ -417,7 +425,23 @@ def collection(data):
     result=data.get('result') or {}
     return {'type':'FeatureCollection','source_result_id':result.get('id'),'stale':data.get('stale',False),'warning':WARNING,
             'features':[{'type':'Feature','id':c['id'],'geometry':c['geometry'],
-                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation','access_evidence','general_plan_matches')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation','access_evidence','general_plan_matches','regional_pzz_matches')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+
+
+def regional_pzz_section(result,candidate):
+    esc=lambda value:html.escape(str('—' if value is None else value),quote=True)
+    source=result.get('sources',{}).get('pzz_context') or {}
+    layer=source.get('layer') or {}
+    status=('Получено '+esc(layer.get('count'))+' зон для области; дата получения '+esc(layer.get('received_at'))+'.'
+            if source.get('applied') else 'Данные ПЗЗ РГИС для этой версии и области не получены.')
+    if source.get('applied') and layer.get('count')==0:
+        status+=' Источник ответил без зон. Это не подтверждает отсутствие ПЗЗ.'
+    rows=[]
+    for row in candidate.get('regional_pzz_matches',[]):
+        rows.append('<li>'+esc(row['id'])+' · пересечение '+esc(row['area_m2'])+' м² · поля '+esc(json.dumps(row['fields'],ensure_ascii=False))
+                    +' · получено '+esc(row['received_at'])+' · SHA-256 '+esc(row['sha256'])+'</li>')
+    return ('<h3>Региональный источник ПЗЗ Крыма</h3><p><a href="'+esc(pzz_context.MAP)+'">Территориальные зоны ПЗЗ в РГИС Крыма</a></p>'
+            +'<p>'+status+'</p><p>'+esc(pzz_context.WARNING)+'</p><ul>'+(''.join(rows) or '<li>Пересечения с полученными зонами не установлены.</li>')+'</ul>')
 
 
 def access_section(candidate):
@@ -472,6 +496,7 @@ def html_report(data,candidate_id=None):
         blocks.append('<section><h2>'+esc(names[c['kind']])+' '+esc(c['id'])+'</h2><p>Площадь '+esc(c['area_m2'])+' м²; точка внутри: '+esc(c['point'])+'. Права не подтверждены; к подаче не готов.</p>'
                       +'<p>До полученного кадастрового контура дорожного назначения: '+esc((c.get('road_proximity') or {}).get('distance_m'))+' м. Расстояние не подтверждает законный подъезд.</p>'
                       +access_section(c)
+                      +regional_pzz_section(result,c)
                       +'<h3>Независимый контекст генплана РГИС</h3><p>'+esc(rgis_context.WARNING)+'</p><p><a href="'+esc(rgis_context.MAP)+'">Официальная карта РГИС</a></p><ul>'+(''.join(gp_rows) or '<li>Совпадения не получены для этой версии/области. Это не подтверждает отсутствие функциональных зон или дорог.</li>')+'</ul>'
                       +'<h3>Особенности</h3><ul>'+''.join('<li>'+esc(f)+'</li>' for f in c['flags'])+'</ul><h3>Полученные совпадения</h3><ul>'+(''.join(evidence) or '<li>Совпадения не установлены. Это не подтверждение отсутствия процедур или ограничений.</li>')+'</ul>'
                       +'<h3>Ближайшие полученные участки</h3><ul>'+''.join('<li>'+esc(n['fields'].get('cad_num',n['id']))+' · '+esc(n['distance_m'])+' м · '+esc(json.dumps(n['fields'],ensure_ascii=False))+'</li>' for n in c['neighbours'])+'</ul>'
