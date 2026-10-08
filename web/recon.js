@@ -2,6 +2,8 @@
 const reconMap=L.map('recon-map').setView([44.99335,34.20543],15);
 const reconDraw=L.featureGroup().addTo(reconMap);
 let reconOutline=null,reconResult=null,reconStale=false;
+let reconPurposeLoaded=false;
+let reconFocus=null;
 LandBasemap.bind(reconMap,el('recon-osm'));
 const reconNames={draft:'Пробный контур',gap:'Нужно проектирование',offer:'Предложение НСПД',auction:'Аукцион / торги'};
 const reconDate=x=>x?new Date(x).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'не получено';
@@ -13,7 +15,19 @@ function drawReconArea(){
 }
 function reconRows(rows,watch=false){
  if(!rows.length)return '<p>Контуры не найдены или ещё не сохранены. Отсутствие результата не подтверждает отсутствие подходящей земли.</p>';
- return '<div class="table-wrap"><table><thead><tr><th>Контур</th><th>Площадь</th><th>Что известно</th><th>Действия</th></tr></thead><tbody>'+rows.map(row=>{const c=watch?row.candidate:row;const stale=watch?row.stale:reconStale||!sameReconBounds();const version=watch?row.result_id:reconResult.id;return `<tr><td><b>${escapeHtml(reconNames[c.kind])}</b><br><small>${escapeHtml(c.id)} · ${stale?'требует обновления':'требует проверки прав'}</small></td><td>${areaFmt(c.area_m2)} м²</td><td>${c.flags.map(escapeHtml).join('<br>')||'Полученные препятствия внутри контура не установлены.'}<br>ЗОУИТ: ${c.matches.restrictions.length}; ПЗЗ: ${c.matches.pzz.length}; процедуры: ${c.lots.length}.${c.road_proximity?"<br>До контура дорожного назначения: "+areaFmt(c.road_proximity.distance_m)+" м":""}<br><small>Права, подъезд и допустимость использования не подтверждены.</small></td><td><button class="button secondary" data-recon-show="${escapeHtml(c.id)}" ${watch?'data-recon-watch-show="1"':''}>На карте</button> <a class="button secondary" target="_blank" rel="noopener" href="/api/recon/dossier?result_id=${encodeURIComponent(version)}&id=${encodeURIComponent(c.id)}">Досье</a> <a class="button secondary" href="/api/recon/rights-request?result_id=${encodeURIComponent(version)}&id=${encodeURIComponent(c.id)}">Запрос сведений</a> <a class="button secondary" href="/api/recon/planning-request?result_id=${encodeURIComponent(version)}&id=${encodeURIComponent(c.id)}">Запрос ПЗЗ</a>${watch?'':` <button class="button secondary" data-recon-save="${escapeHtml(c.id)}" ${stale?'disabled':''}>В разработку</button>`}</td></tr>`}).join('')+'</tbody></table></div>';
+ return '<div class="table-wrap"><table><thead><tr><th>Контур</th><th>Площадь</th><th>Что известно</th><th>Действия</th></tr></thead><tbody>'+rows.map(row=>{const c=watch?row.candidate:row;const stale=watch?row.stale:reconStale||!sameReconBounds();const version=watch?row.result_id:reconResult.id;return `<tr><td><b>${escapeHtml(reconNames[c.kind])}</b><br><small>${escapeHtml(c.id)} · ${stale?'требует обновления':'требует проверки прав'}</small></td><td>${areaFmt(c.area_m2)} м²</td><td>${c.flags.map(escapeHtml).join('<br>')||'Полученные препятствия внутри контура не установлены.'}<br>ЗОУИТ: ${c.matches.restrictions.length}; ПЗЗ: ${c.matches.pzz.length}; процедуры: ${c.lots.length}.${c.road_proximity?"<br>До контура дорожного назначения: "+areaFmt(c.road_proximity.distance_m)+" м":""}${reconAccessText(c)}<br><small>Права, подъезд и допустимость использования не подтверждены.</small></td><td><button class="button secondary" data-recon-show="${escapeHtml(c.id)}" ${watch?'data-recon-watch-show="1"':''}>На карте</button> <a class="button secondary" target="_blank" rel="noopener" href="/api/recon/dossier?result_id=${encodeURIComponent(version)}&id=${encodeURIComponent(c.id)}">Досье</a> <a class="button secondary" href="/api/recon/rights-request?result_id=${encodeURIComponent(version)}&id=${encodeURIComponent(c.id)}">Запрос сведений</a> <a class="button secondary" href="/api/recon/planning-request?result_id=${encodeURIComponent(version)}&id=${encodeURIComponent(c.id)}">Запрос ПЗЗ</a>${watch?'':` <button class="button secondary" data-recon-save="${escapeHtml(c.id)}" ${stale?'disabled':''}>В разработку</button>`}</td></tr>`}).join('')+'</tbody></table></div>';
+}
+function reconAccessText(c){
+ const a=c.access_evidence;if(!a)return '';
+ const distance=row=>row?areaFmt(row.distance_m)+' м':'не установлено';
+ return '<br>До полученного участка: '+distance(a.nearest_parcel)+'; здания: '+distance(a.nearest_building)+'.'+(a.direct_segment?'<br>Прямой отрезок к дороге: '+areaFmt(a.direct_segment.length_m)+' м; пересечения участков: '+a.intersections.parcels.length+', зданий: '+a.intersections.buildings.length+'. Это не маршрут.':'<br>Контур дорожного назначения не получен.');
+}
+function showReconCandidate(c){
+ if(reconFocus)reconDraw.removeLayer(reconFocus);
+ reconFocus=L.featureGroup().addTo(reconDraw);
+ L.geoJSON({type:'Feature',geometry:c.geometry,properties:{}},{style:{color:'#bc841e',weight:4,fillOpacity:.2}}).addTo(reconFocus);
+ const a=c.access_evidence;if(a?.direct_segment)L.geoJSON({type:'Feature',geometry:a.direct_segment.geometry,properties:{}},{style:{color:'#82479b',weight:4,dashArray:'7 6'},pointToLayer:(f,p)=>L.circleMarker(p,{color:'#82479b',radius:6}),onEachFeature:(f,l)=>l.bindPopup('Прямой отрезок к полученному контуру дорожного назначения. Не маршрут; законный подъезд не подтверждён.')}).addTo(reconFocus);
+ reconMap.fitBounds(reconFocus.getBounds(),{padding:[25,25]});
 }
 let reconWatch=[];
 async function refreshRecon(){
@@ -21,7 +35,8 @@ async function refreshRecon(){
  const a=d.attempt;el('recon-status').textContent=a?`Последняя операция: ${({running:'выполняется',done:'завершена',error:'ошибка',interrupted:'прервана'})[a.state]||a.state} · ${a.step||''}${a.error?' · '+a.error:''}`:'Выделите область, задайте площадь и нажмите «Найти контуры».';
  if(reconResult){
   const r=reconResult,s=r.summary;
-  el('recon-status').textContent+=`\nРасчёт ${reconDate(r.created_at)}. Пробных контуров: ${s.drafts}; предложений: ${s.offers}; аукционов: ${s.auctions}; промежутков для проектирования: ${s.large_gaps}. Вычтены полученные участки (${s.excluded_parcels}) и здания (${s.excluded_buildings}).\n${r.warning}${d.stale?' Источники или правила расчёта изменились; повторите расчёт.':''}${r.operation_warnings.length?'\n'+r.operation_warnings.join('\n'):''}`;
+  if(!reconPurposeLoaded){el('recon-purpose').value=r.parameters.purpose;reconPurposeLoaded=true}
+  el('recon-status').textContent+=`\nРасчёт ${reconDate(r.created_at)}. Цель: ${({'housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'})[r.parameters.purpose]||'не выбрана'}. Пробных контуров: ${s.drafts}; предложений: ${s.offers}; аукционов: ${s.auctions}; промежутков для проектирования: ${s.large_gaps}. Вычтены полученные участки (${s.excluded_parcels}) и здания (${s.excluded_buildings}).\n${r.warning}${d.stale?' Источники или правила расчёта изменились; повторите расчёт.':''}${r.operation_warnings.length?'\n'+r.operation_warnings.join('\n'):''}`;
   const dates=Object.values(r.sources.nspd).map(x=>x.received_at).filter(Boolean).sort();
   const tileText=Object.entries(r.sources.nspd).filter(([k,v])=>v.coverage).map(([k,v])=>`${k==='parcels'?'Кадастр':'Здания'}: основной ответ ${v.coverage.parent_count}; по частям ${v.coverage.children_unique_count}; добавлено ${v.coverage.additional_ids.length}; полнота ЕГРН не подтверждена`).join('; ');
   const regional=r.sources.torgi_active;const regionalText=regional?.id?`Региональные публикации: ${regional.lots} (ЗК: ${regional.groups?.land_provision??'не установлено'}; имущество должников: ${regional.groups?.debt_sale??'не установлено'}) · ${reconDate(regional.received_at)}; номеров без геометрии ${regional.unlocated_numbers.length}; лотов без номера ${regional.lots_without_number}.`:'Региональная выборка не подключена.';
@@ -30,6 +45,7 @@ async function refreshRecon(){
   const kind=el('recon-kind').value;el('recon-results').innerHTML=reconRows(r.candidates.filter(c=>kind==='all'||c.kind===kind));
   el('recon-export').classList.remove('hidden');el('recon-report').classList.remove('hidden');
   reconDraw.clearLayers();
+  reconFocus=null;
   for(const mode of ['parcels','buildings','restrictions'])L.geoJSON(r.map_layers[mode],{style:{color:mode==='restrictions'?'#bd4d4d':mode==='parcels'?'#87918a':'#624332',weight:1,fillOpacity:mode==='restrictions'?.04:.15,dashArray:mode==='restrictions'?'5 4':null},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   for(const mode of ['settlements','quarters','schemes','planned_parcels','red_lines','water','forests','protected','heritage'])if(r.map_layers[mode])L.geoJSON(r.map_layers[mode],{style:{color:mode==='red_lines'?'#cf3544':mode==='quarters'?'#8067aa':mode==='water'?'#4489a5':['forests','protected'].includes(mode)?'#567741':mode==='settlements'?'#4489a5':'#b05e35',weight:mode==='red_lines'?2:1,fillOpacity:.02,dashArray:'5 6'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
   if(el('boundary-show').checked&&r.map_layers.historical_boundary)L.geoJSON(r.map_layers.historical_boundary,{style:{color:'#9a5a32',weight:3,fill:false,dashArray:'9 7'},onEachFeature:(f,l)=>l.bindPopup(escapeHtml(f.properties.label))}).addTo(reconDraw);
@@ -53,7 +69,7 @@ el('recon-run').addEventListener('click',runRecon);
 el('recon-kind').addEventListener('change',refreshRecon);
 el('boundary-show').addEventListener('change',refreshRecon);
 for(const container of ['recon-results','recon-watch'])el(container).addEventListener('click',async e=>{
- const show=e.target.closest('[data-recon-show]');if(show){const c=show.dataset.reconWatchShow?reconWatch.find(r=>r.candidate.id===show.dataset.reconShow)?.candidate:reconResult?.candidates.find(c=>c.id===show.dataset.reconShow);if(c){const layer=L.geoJSON({type:'Feature',geometry:c.geometry,properties:{}},{style:{color:'#bc841e',weight:4,fillOpacity:.2}}).addTo(reconDraw);reconMap.fitBounds(layer.getBounds(),{padding:[25,25]})}return;}
+ const show=e.target.closest('[data-recon-show]');if(show){const c=show.dataset.reconWatchShow?reconWatch.find(r=>r.candidate.id===show.dataset.reconShow)?.candidate:reconResult?.candidates.find(c=>c.id===show.dataset.reconShow);if(c)showReconCandidate(c);return;}
  const save=e.target.closest('[data-recon-save]');if(!save||running||!reconResult)return;save.disabled=true;
  try{await api('/api/recon/watch',{result_id:reconResult.id,id:save.dataset.reconSave});await refreshRecon()}catch(error){el('recon-status').textContent=error.message}finally{save.disabled=reconStale||!sameReconBounds()}
 });

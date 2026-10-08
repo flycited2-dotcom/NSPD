@@ -128,6 +128,24 @@ def test_dated_enquiry_matches_exact_geometry_and_contains_no_neighbor_identity(
     with pytest.raises(ValueError, match='Контур'): land_status.enquiry(data, 'other')
 
 
+@pytest.mark.parametrize('parameters,expected_purpose', [
+    ({'purpose': 'housing'}, 'ИЖС'),
+    ({'purpose': 'unspecified'}, '[указать цель использования]'),
+    ({}, '[указать цель использования]'),
+])
+def test_unsent_enquiry_uses_search_purpose_without_inventing_applicant_status(parameters, expected_purpose):
+    data = {'result': {'id': 'result', 'created_at': 'original-date',
+                       'parameters': parameters, 'candidates': [candidate()]}, 'stale': False}
+    before = copy.deepcopy(data)
+    text = land_status.enquiry(data, 'candidate').decode('utf-8')
+    assert 'Предполагаемая цель: ' + expected_purpose + '.' in text
+    assert 'НЕ ОТПРАВЛЕН' in text
+    assert 'Основания/статус заявителя: [уточнить перед отправкой]' in text
+    assert 'Заявитель и обратный адрес: [заполнить перед отправкой]' in text
+    assert 'не заявление о предоставлении, регистрации права или участии в торгах' in text
+    assert data == before
+
+
 def test_unsupported_or_malicious_links_never_become_dossier_hrefs(catalog):
     catalog['items'][0]['url'] = 'javascript:alert(1)'
     snapshot = land_status.procedures(catalog)

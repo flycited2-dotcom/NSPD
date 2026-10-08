@@ -13,9 +13,9 @@ from shapely.ops import unary_union
 from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations, planning_enquiry
 from .geometry import convert, polygons
 from .review import CHECKS
-from . import regional_documents
+from . import regional_documents, access_evidence
 
-VERSION=9
+VERSION=10
 KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
@@ -247,8 +247,10 @@ def build(values,params):
                            'road_proximity':{'id':road[1]['id'],'distance_m':round(g.distance(road[0]),1),'fields':public_fields(road[1]),'received_at':layers['parcels'].get('received_at'),'legal_access_confirmed':False} if road else None,
                            'neighbours':neighbours,'matches':matches,'context_matches':context_matches,'boundary_observation':boundary_observation,'lots':related,'documents':document_context(values,numbers),
                            'flags':flags,'required_checks':list(CHECKS.values()),'status':'needs_review','rights_confirmed':False,'srzu_ready':False})
+    access_source=access_evidence.prepare(s)
     for candidate in candidates:
         candidate['land_status']=land_status.assessment(candidate,values)
+        candidate['access_evidence']=access_evidence.assessment_prepared(candidate,access_source)
     source_numbers={n for lot in (source or {}).get('lots',[]) for n in lot['cadastral_numbers']}
     active_numbers={n for lot in (active_source or {}).get('lots',[]) for n in lot['cadastral_numbers']}
     sources={'nspd':{mode:{key:copy.deepcopy(layer.get(key)) for key in ('source','sha256','sha256_kind','received_at','coverage','observations')} | {'count':len(layer['geojson']['features']),'coverage_confirmed':False} for mode,layer in layers.items()},
@@ -406,7 +408,29 @@ def collection(data):
     result=data.get('result') or {}
     return {'type':'FeatureCollection','source_result_id':result.get('id'),'stale':data.get('stale',False),'warning':WARNING,
             'features':[{'type':'Feature','id':c['id'],'geometry':c['geometry'],
-                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation','access_evidence')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+
+
+def access_section(candidate):
+    observation=candidate.get('access_evidence')
+    if not observation:return '<h3>Наблюдение по направлению к дороге</h3><p>В этой версии не рассчитывалось.</p>'
+    esc=lambda x:html.escape(str('—' if x is None else x),quote=True)
+    def source(row):
+        return (' · источник <a href="'+esc(safe_url(row.get('source')))+'">НСПД</a> · получено '+esc(row.get('received_at'))
+                +' · SHA-256 '+esc(row.get('sha256'))+' ('+esc(row.get('sha256_kind'))+')')
+    rows=[]
+    for key,title in (('nearest_parcel','Ближайший полученный участок'),('nearest_building','Ближайшее полученное здание'),('road','Ближайший полученный контур дорожного назначения')):
+        row=observation.get(key)
+        rows.append('<li>'+title+': '+(esc(row.get('cadastral_number') or row.get('feature_id'))+' · '+esc(row['distance_m'])+' м'+source(row) if row else 'не установлен по полученным геометриям')+'</li>')
+    segment=observation.get('direct_segment')
+    if segment:
+        rows.append('<li>Кратчайший прямой отрезок: '+esc(segment['length_m'])+' м; в пределах обследования: '+('да' if segment['within_survey_bounds'] else 'нет')+'. Это не маршрут и не полоса проезда.</li>')
+        for group,title in (('intersections','Пересечения положительной длины'),('touches','Касания без длины')):
+            for mode,name in (('parcels','участки'),('buildings','здания')):
+                records=observation[group][mode]
+                rows.append('<li>'+title+', '+name+': '+str(len(records))+'<ul>'+''.join('<li>'+esc(row.get('cadastral_number') or row['feature_id'])+' · '+esc(row['intersection_length_m'])+' м'+source(row)+'</li>' for row in records)+'</ul></li>')
+    return ('<h3>Наблюдение по направлению к дороге</h3><p>'+esc(observation['warning'])+'</p><ul>'+''.join(rows)+'</ul>'
+            +'<p>Алгоритм '+esc(observation['algorithm'])+'; обследование '+esc(observation['survey_id'])+'. Законный доступ не подтверждён.</p>')
 
 
 def html_report(data,candidate_id=None):
@@ -434,6 +458,7 @@ def html_report(data,candidate_id=None):
         for doc in c['documents']:evidence.append('<li><a href="'+esc(doc['url'])+'">'+esc(doc['title'])+'</a> · '+esc(doc['scope'])+' · '+esc(doc.get('received_at'))+'</li>')
         blocks.append('<section><h2>'+esc(names[c['kind']])+' '+esc(c['id'])+'</h2><p>Площадь '+esc(c['area_m2'])+' м²; точка внутри: '+esc(c['point'])+'. Права не подтверждены; к подаче не готов.</p>'
                       +'<p>До полученного кадастрового контура дорожного назначения: '+esc((c.get('road_proximity') or {}).get('distance_m'))+' м. Расстояние не подтверждает законный подъезд.</p>'
+                      +access_section(c)
                       +'<h3>Особенности</h3><ul>'+''.join('<li>'+esc(f)+'</li>' for f in c['flags'])+'</ul><h3>Полученные совпадения</h3><ul>'+(''.join(evidence) or '<li>Совпадения не установлены. Это не подтверждение отсутствия процедур или ограничений.</li>')+'</ul>'
                       +'<h3>Ближайшие полученные участки</h3><ul>'+''.join('<li>'+esc(n['fields'].get('cad_num',n['id']))+' · '+esc(n['distance_m'])+' м · '+esc(json.dumps(n['fields'],ensure_ascii=False))+'</li>' for n in c['neighbours'])+'</ul>'
                       +planning_regulations.dossier_section(result)

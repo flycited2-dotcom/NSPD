@@ -66,6 +66,40 @@ def test_road_distance_does_not_confirm_legal_access():
     result=recon.build(values,recon.options({}))
     assert all(c['road_proximity']['distance_m']>=0 and not c['road_proximity']['legal_access_confirmed'] for c in result['candidates'])
 
+
+def test_access_observations_survive_dossier_export_without_approving_candidate():
+    values=fixture()
+    values['survey']['layers']['parcels']['geojson']['features'][0]['properties']['options']['permitted_use_established_by_document']='Улично-дорожная сеть'
+    result=recon.build(values,recon.options({'purpose':'housing'}));result['id']='version';result['operation_warnings']=[]
+    data={'result':result,'stale':False}
+    exported=recon.collection(data)
+    assert len(exported['features'])==len(result['candidates'])>0
+    for c,f in zip(result['candidates'],exported['features']):
+        a=c['access_evidence']
+        assert f['properties']['access_evidence']==a
+        assert a['survey_id']=='survey' and a['road']['sha256']=='source-hash'
+        assert not a['legal_access_confirmed'] and not a['coverage_confirmed']
+        assert not c['rights_confirmed'] and not c['srzu_ready']
+        dossier=recon.html_report(data,c['id']).decode()
+        assert 'Наблюдение по направлению к дороге' in dossier and 'source-hash' in dossier and 'source-date' in dossier
+        assert 'ИЖС' in dossier and 'Законный доступ не подтверждён' in dossier
+    assert result['summary']['confirmed_free']==result['summary']['ready_to_submit']==0
+
+
+def test_previous_dossier_without_access_observation_remains_readable():
+    result=recon.build(fixture(),recon.options({}));result['id']='previous';result['operation_warnings']=[]
+    candidate=result['candidates'][0];candidate.pop('access_evidence')
+    assert 'В этой версии не рассчитывалось' in recon.html_report({'result':result,'stale':True},candidate['id']).decode()
+
+
+def test_access_dossier_escapes_source_fields():
+    result=recon.build(fixture(),recon.options({}))
+    candidate=result['candidates'][0]
+    candidate['access_evidence']['nearest_parcel'].update(cadastral_number='<script>bad</script>',source='javascript:bad',sha256='"<img src=x>')
+    section=recon.access_section(candidate)
+    assert '<script>' not in section and '<img' not in section and 'javascript:bad' not in section
+    assert '&lt;script&gt;bad' in section
+
 def test_active_lot_deduplicated_with_nspd_auction_and_dated_geometry_preserved():
     values=fixture();number='90:12:1:2';g=box(34.207,44.995,34.208,44.996)
     f=feature(g,'lot-geometry',number)
