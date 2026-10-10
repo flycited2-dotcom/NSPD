@@ -13,9 +13,9 @@ from shapely.ops import unary_union
 from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations, planning_enquiry
 from .geometry import convert, polygons
 from .review import CHECKS
-from . import regional_documents, access_evidence, rgis_context, pzz_context
+from . import regional_documents, access_evidence, rgis_context, pzz_context, candidate_checks
 
-VERSION=12
+VERSION=13
 KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context','pzz_context')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
@@ -312,7 +312,7 @@ def build(values,params):
         'properties':{'label':'ПЗЗ РГИС · '+str(f['properties'].get('symbol') or f['id'])+' · '+str(f['properties'].get('territorialzonename') or '')+' · действующая редакция и допустимость использования не подтверждены',
                       'currentness_confirmed':False,'used_for_exclusion':False}}
         for _,f in pzz_entries if not shape(f['geometry']).intersection(boundary).is_empty]}
-    return {'created_at':store.now(),'version':VERSION,'survey_id':s['id'],'source_inputs':identities(values),'bounds':s['bounds'],
+    result={'created_at':store.now(),'version':VERSION,'survey_id':s['id'],'source_inputs':identities(values),'bounds':s['bounds'],
             'parameters':params,'sources':sources,'candidates':candidates,'layout':layout,'warning':WARNING,
             'map_layers':map_layers,
             'summary':{'candidate_count':len(candidates),'drafts':sum(c['kind']=='draft' for c in candidates),
@@ -321,6 +321,9 @@ def build(values,params):
                        'coverage_confirmed':False,'excluded_parcels':len(layers['parcels']['geojson']['features']),
                        'filtered':filtered,'candidate_rows_omitted':max(0,len(rows)-520),
                        'excluded_buildings':len(layers.get('buildings',{}).get('geojson',{}).get('features',[]))}}
+    for candidate in candidates:
+        candidate['check_progress']=candidate_checks.assessment(candidate,result)
+    return result
 
 
 def run(project,params):
@@ -425,7 +428,34 @@ def collection(data):
     result=data.get('result') or {}
     return {'type':'FeatureCollection','source_result_id':result.get('id'),'stale':data.get('stale',False),'warning':WARNING,
             'features':[{'type':'Feature','id':c['id'],'geometry':c['geometry'],
-                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation','access_evidence','general_plan_matches','regional_pzz_matches')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+                         'properties':{key:c.get(key) for key in ('id','kind','area_m2','status','rights_confirmed','srzu_ready','flags','parent_gap_id','boundary_observation','access_evidence','general_plan_matches','regional_pzz_matches','check_progress')} | {'calculated_at':result.get('created_at'),'survey_id':result.get('survey_id')}} for c in result.get('candidates',[])]}
+
+
+def checks_section(candidate,stale=False):
+    esc=lambda value:html.escape(str(value if value is not None else 'не получено'),quote=True)
+    progress=candidate.get('check_progress')
+    heading='<h3>Ход проверки контура</h3>'
+    if not progress or progress.get('algorithm')!=candidate_checks.ALGORITHM:
+        return heading+'<p>В этой версии таблица проверок не рассчитывалась; повторите локальный расчёт.</p>'
+    labels={'observed':'Наблюдения получены','attention':'Есть пересечения или особенности','unknown':'Сведения не установлены'}
+    rows=[]
+    for row in progress['rows']:
+        evidence=[]
+        for item in row['evidence']:
+            url=safe_url(item.get('source'))
+            source=('<a href="'+esc(url)+'">'+esc(url)+'</a>') if url else esc(item.get('source') or 'источник не указан')
+            title=item.get('title') or item.get('label')
+            evidence.append('<li>'+(esc(title)+' · ' if title else '')+source+' · получено '+esc(item.get('received_at'))+' · SHA-256 '+esc(item.get('sha256'))
+                            +(' · ID '+esc(item['id']) if item.get('id') else '')
+                            +(' · объектов '+esc(item['count']) if item.get('count') is not None else '')
+                            +(' · состояние '+esc(item['state']) if item.get('state') else '')+'</li>')
+        rows.append('<tr><th scope="row">'+esc(row['title'])+'<br><small>'+esc(labels.get(row['state'],labels['unknown']))+'</small></th>'
+                    +'<td>'+esc(row['observation'])+('<details><summary>Источники и даты</summary><ul>'+''.join(evidence)+'</ul></details>' if evidence else '')+'</td>'
+                    +'<td>'+esc(row['remaining'])+'</td></tr>')
+    return (heading+'<p>Полученные наблюдения не означают, что проверка пройдена. Права, полнота данных и готовность к подаче не подтверждены.</p>'
+            +('<p>Это снимок прежнего расчёта: источники или правила изменились; повторите расчёт.</p>' if stale else '')
+            +'<h4>Что проверить следующим</h4><ol>'+''.join('<li>'+esc(action)+'</li>' for action in progress['next_actions'])+'</ol>'
+            +'<div style="overflow-x:auto"><table><thead><tr><th>Проверка</th><th>Получено</th><th>Что осталось проверить</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table></div>')
 
 
 def regional_pzz_section(result,candidate):
@@ -494,6 +524,7 @@ def html_report(data,candidate_id=None):
             for row in rows:
                 gp_rows.append('<li>'+esc(rgis_context.TITLES[mode])+' · '+esc(row['id'])+' · пересечение '+esc(row['area_m2'])+' м² · поля '+esc(json.dumps(row['fields'],ensure_ascii=False))+' · получено '+esc(row['received_at'])+' · SHA-256 '+esc(row['sha256'])+'</li>')
         blocks.append('<section><h2>'+esc(names[c['kind']])+' '+esc(c['id'])+'</h2><p>Площадь '+esc(c['area_m2'])+' м²; точка внутри: '+esc(c['point'])+'. Права не подтверждены; к подаче не готов.</p>'
+                      +checks_section(c,data.get('stale',False))
                       +'<p>До полученного кадастрового контура дорожного назначения: '+esc((c.get('road_proximity') or {}).get('distance_m'))+' м. Расстояние не подтверждает законный подъезд.</p>'
                       +access_section(c)
                       +regional_pzz_section(result,c)
@@ -503,8 +534,8 @@ def html_report(data,candidate_id=None):
                       +planning_regulations.dossier_section(result)
                       +planning_enquiry.dossier_section(result,c,data.get('stale',False))
                       +land_status.dossier_section(result,c,data.get('stale',False))
-                      +'<h3>Недостающие проверки</h3><ul>'+''.join('<li>'+esc(x)+'</li>' for x in c['required_checks'])+'</ul><h3>Контур WGS84</h3><pre>'+esc(json.dumps(c['geometry'],ensure_ascii=False))+'</pre></section>')
-    return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}@media print{section{break-before:page}}</style>'
+                      +'<details><summary>Полный перечень недостающих проверок</summary><ul>'+''.join('<li>'+esc(x)+'</li>' for x in c['required_checks'])+'</ul></details><h3>Контур WGS84</h3><pre>'+esc(json.dumps(c['geometry'],ensure_ascii=False))+'</pre></section>')
+    return ('<!doctype html><html lang="ru"><meta charset="utf-8"><title>Поиск участков: рабочее досье</title><style>body{font:16px/1.5 system-ui;max-width:1000px;margin:30px auto;padding:0 20px;color:#21382b}section{border-top:1px solid #ccd8ce;margin-top:30px}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin:8px 0}a{overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:10px;border:1px solid #ccd8ce;vertical-align:top;text-align:left;overflow-wrap:anywhere}th{background:#f2f4ef}small{font-weight:normal}@media print{section{break-before:page}}</style>'
             +'<h1>Поиск участков: рабочее досье</h1><p>'+esc(WARNING)+'</p><p>'+('Предыдущая версия: источники изменились.' if data.get('stale') else 'Датированная версия расчёта.')+'</p><p>Расчёт '+esc(result.get('created_at'))+'; цель '+esc(PURPOSES.get(result.get('parameters',{}).get('purpose'),'Не выбрана'))+'.</p>'
             +'<p>Подтверждённых свободных участков: 0. Досье не является СРЗУ или заявлением.</p>'
             +''.join('<p>'+esc(w)+'</p>' for w in result.get('operation_warnings',[]))+''.join(blocks)
