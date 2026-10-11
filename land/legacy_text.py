@@ -6,13 +6,18 @@ import struct
 import olefile
 from striprtf.striprtf import PATTERN, destinations, rtf_to_text
 
-ALGORITHM = 'torgi-legacy-text-v1'
+ALGORITHM = 'torgi-legacy-text-v2'
 MAX_BYTES = 8 * 1024 * 1024
 MAX_TEXT = 500000
 OLE_MAGIC = bytes.fromhex('d0cf11e0a1b11ae1')
 # Word uses these case-sensitive table/math formatting controls. Destinations
 # such as mmathPr are skipped by striprtf; do not lowercase arbitrary controls.
-RTF_MIXED_FORMATTING = frozenset(('trftsWidthB','mmathFont','mbrkBin','mbrkBinSub',
+# Microsoft RTF 1.9.1, Table Definitions, pp. 98 and 101:
+# https://officeprotocoldoc.z19.web.core.windows.net/files/Archive_References/%5BMSFT-RTF%5D.pdf
+# These exact case-sensitive controls set row/cell widths or their units. They
+# are formatting, not destinations; text extraction ignores their dimensions.
+RTF_TABLE_WIDTH_FORMATTING = frozenset(('clftsWidth', 'clwWidth', 'trftsWidth'))
+RTF_MIXED_FORMATTING = RTF_TABLE_WIDTH_FORMATTING | frozenset(('trftsWidthB','mmathFont','mbrkBin','mbrkBinSub',
     'msmallFrac','mdispDef','mlMargin','mrMargin','mdefJc','mwrapIndent','mintLim','mnaryLim'))
 # MS-DOC 2.9.73: eight-bit Unicode with the following explicit exceptions.
 # https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/aa2e55a2-f4f2-4795-bab5-6d9d7a0ed249
