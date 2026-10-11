@@ -21,7 +21,7 @@ async function refreshRegionalDocs(){
  if(r)text+=`Получено карточек: ${r.cards.filter(c=>c.state==='received').length}; прочитано файлов: ${files.filter(f=>f.state==='read').length}; ошибки/отклонения файлов: ${files.filter(f=>['error','rejected'].includes(f.state)).length}. ${r.warning} ${d.search_stale?'Поиск изменился; нужны свежие карточки. ':''}`;
  if(d.selected_lot_id)text+=`Выбран лот ${d.selected_lot_id}: в очереди ${d.selected_files_remaining}; для локального перечтения ${d.selected_files_to_reprocess}. `;
  else text+=`Для локального перечтения: ${d.files_to_reprocess}. `;
- for(const [label,a] of [['Карточки',d.attempt],['Файлы',d.reading_attempt],['Перечтение',d.reprocess_attempt],['OCR',d.visual_attempt]])if(a)text+=`${label}: ${operationState(a.state)} · ${a.processed}/${a.requested}${a.lot_id?' · лот '+a.lot_id:''}${a.error?' · '+docErrorText(a.error):''}. `;
+ for(const [label,a] of [['Карточки',d.attempt],['Файлы',d.reading_attempt],['Перечтение',d.reprocess_attempt],['OCR',d.visual_attempt]])if(a)text+=`${label}: ${operationState(a.state)} · ${a.processed}/${a.requested}${a.received!==undefined?' · получено '+a.received:''}${a.errors!==undefined?' · ошибок '+a.errors:''}${a.lot_id?' · лот '+a.lot_id:''}${a.error?' · '+docErrorText(a.error):''}. `;
  el('regional-doc-status').textContent=text;
  if(!r)return;
  el('regional-doc-lot').innerHTML='<option value="">Все полученные лоты ЗК</option>'+r.cards.filter(c=>c.state==='received').map(c=>`<option value="${escapeHtml(c.lot_id)}">${escapeHtml(c.lot_id)}</option>`).join('');

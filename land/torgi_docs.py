@@ -197,6 +197,10 @@ def reprocess_queue(result):
     def outdated(file):
         if file['state']=='read' and file.get('format')=='pdf':return file.get('algorithm')!=ALGORITHM
         if file['state']!='rejected' or not file.get('eligible') or not file.get('sha256'):return False
+        if file.get('format') in ('jpg','jpeg'):
+            return (file.get('error')=='Формат, число кадров или размер изображения превышает лимит'
+                    and bool(file.get('received_at')) and not file.get('metadata_conflict')
+                    and file.get('reprocess_algorithm')!=image_evidence.ALGORITHM)
         if file.get('format')=='docx':
             return (file.get('error')=='Основной XML DOCX превышает лимит'
                     and file.get('reprocess_algorithm')!=DOCX_ALGORITHM)
@@ -219,7 +223,7 @@ def reprocess(project,params,active=False):
     try:
         for file in selected:
             assert_current(project,search,catalog_id,active)
-            fmt=file['format'];algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else ALGORITHM
+            fmt=file['format'];algorithm=LEGACY_ALGORITHM if fmt in ('doc','rtf') else DOCX_ALGORITHM if fmt=='docx' else image_evidence.ALGORITHM if fmt in image_evidence.FORMATS else ALGORITHM
             try:
                 digest=file.get('sha256')
                 if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
@@ -227,6 +231,7 @@ def reprocess(project,params,active=False):
                 path=store.DATA/'torgi_documents'/(digest+'.'+fmt)
                 if not path.is_file() or path.stat().st_size>file_limit(fmt) or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
                     raise ValueError('Сохранённый файл отсутствует, слишком велик или изменился')
+                if fmt in image_evidence.FORMATS:validate_download(file,path.read_bytes())
                 file.update(extract_file(path,digest,fmt),state='read',reprocessed_at=store.now(),geometry_confirmed=False,
                             reprocess_algorithm=algorithm)
                 file.pop('error',None)

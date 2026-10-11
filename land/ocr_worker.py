@@ -100,23 +100,29 @@ async def process(path, digest, number, folder, max_pdf_mib=8, max_pdf_pages=40)
 
 
 async def process_image(path, digest, fmt, folder):
-    from .image_evidence import preview
+    from .image_evidence import preview, scope
     ocr, info = engine()
     raw = path.read_bytes()
     if len(raw) > 8 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
         raise ValueError('Размер или SHA-256 изображения не соответствует источнику')
     views = []
+    image_scope = None
     for index, side in enumerate(LONG_SIDES):
         if side > info['max_image_dimension']:
             raise ValueError('Разрешение превышает лимит OCR Windows')
-        png, _ = preview(raw, fmt, side)
+        png, image_info = preview(raw, fmt, side)
+        current_scope = scope(image_info) if image_info.get('source_format') == 'MPO' else None
+        if index and current_scope != image_scope:
+            raise ValueError('Область изображения изменилась между чтениями OCR')
+        image_scope = current_scope
         target = folder / f'p1-v{index}.png'
         target.write_bytes(png)
         result = await asyncio.wait_for(recognize(ocr, target), timeout=20)
         result.update(view=index, image_sha256=hashlib.sha256(png).hexdigest())
         views.append(result)
     return {'algorithm': ALGORITHM, 'source_sha256': digest, 'source_format': fmt, 'page': 1,
-            'engine': info, 'views': views, 'processed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+            'engine': info, 'views': views, 'processed_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            **({'image_scope': image_scope} if image_scope is not None else {})}
 
 
 def main():

@@ -22,7 +22,22 @@ def folder(file):
     digest, fmt = file['sha256'], file['format']
     if not re.fullmatch(r'[0-9a-f]{64}', digest) or fmt not in ('pdf', *image_evidence.FORMATS):
         raise ValueError('Некорректный идентификатор OCR')
-    return store.DATA / 'torgi_ocr' / (digest + '-' + fmt)
+    base = store.DATA / 'torgi_ocr' / (digest + '-' + fmt)
+    scope = image_scope(file)
+    return base / ('frame0-' + scope['preview_algorithm'] + '-n' + str(scope['source_frame_count'])) if scope else base
+
+
+def image_scope(file):
+    """Only source-bound MPO observations need the explicit primary-frame scope."""
+    info = file.get('image') or {}
+    return image_evidence.scope(info) if info.get('source_format') == 'MPO' else None
+
+
+def scope_matches(observed, expected):
+    try:
+        return image_evidence.scope(observed) == expected
+    except ValueError:
+        return False
 
 
 def queue(result, retry=False):
@@ -35,12 +50,15 @@ def queue(result, retry=False):
         units = [1] if file.get('format') in image_evidence.FORMATS else sorted(set(file.get('image_or_sparse_pages', []))) if file.get('format') == 'pdf' else []
         prior = file.get('visual_ocr') or {}
         old = {p['page']: p for p in prior.get('pages', [])} if prior.get('source_sha256') == file['sha256'] else {}
+        scope = image_scope(file)
         for number in units:
             limit = min(file.get('processed_pages', 1), torgi_docs.pdf_scope(file)[1]) if file['format'] == 'pdf' else 1
             if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= limit:
                 raise ValueError('Недопустимая страница OCR торгов')
             item = old.get(number)
-            if not item or item.get('algorithm') != ocr.ALGORITHM or (retry and item['state'] == 'error'):
+            if (not item or item.get('algorithm') != ocr.ALGORITHM
+                    or (scope is not None and not scope_matches(item.get('image_scope'), scope))
+                    or (retry and item['state'] == 'error')):
                 pending.append((file, number))
     return pending
 
@@ -58,12 +76,16 @@ def read_unit(file, number):
     data = json.loads(target.read_text(encoding='utf-8'))
     if data.get('source_sha256') != file['sha256'] or data.get('source_format') != file['format'] or data.get('page') != number:
         raise ValueError('OCR относится к другому источнику/странице')
+    scope = image_scope(file)
+    if scope is not None and not scope_matches(data.get('image_scope'), scope):
+        raise ValueError('OCR относится к другому кадру или контейнеру MPO')
     observation = ocr.summarize(data)
     for view in observation['views']:
         image = target_folder / f'p{number}-v{view["view"]}.png'
         if not image.is_file() or image.stat().st_size > 16 * 1024 * 1024 or hashlib.sha256(image.read_bytes()).hexdigest() != view['image_sha256']:
             raise ValueError('Изображение OCR отсутствует или изменилось')
     observation.update(processed_at=data['processed_at'], cached=cached, unit='image' if file['format'] in image_evidence.FORMATS else 'pdf_page')
+    if scope is not None:observation['image_scope'] = scope
     return observation
 
 
@@ -78,7 +100,8 @@ def run(project, params, active=False):
     result = copy.deepcopy(old)
     catalog_id = old['id']
     selected = queue(result, retry)[:BATCH]
-    attempt = {'state': 'running', 'started_at': store.now(), 'processed': 0, 'requested': len(selected), 'network_requests': 0}
+    attempt = {'state': 'running', 'started_at': store.now(), 'processed': 0, 'requested': len(selected),
+               'errors': 0, 'received': 0, 'network_requests': 0}
     attempt_key = torgi.setting_key(project, active, '_visual_attempt')
     store.set_setting(attempt_key, attempt)
     try:
@@ -97,16 +120,20 @@ def run(project, params, active=False):
                 observation = read_unit(file, number)
             except Exception as exc:
                 observation = {'page': number, 'state': 'error', 'processed_at': store.now(), 'algorithm': ocr.ALGORITHM, 'error': str(exc)[:500]}
+                scope = image_scope(file)
+                if scope is not None:observation['image_scope'] = scope
             prior['pages'] = sorted([p for p in prior['pages'] if p['page'] != number] + [observation], key=lambda p: p['page'])
             file['visual_ocr'] = prior
+            attempt['errors' if observation['state'] == 'error' else 'received'] += 1
             attempt['processed'] += 1
             catalog_id = torgi_docs.persist_current(project, result, search, catalog_id, active)
             store.set_setting(attempt_key, attempt)
         catalog_id = torgi_docs.persist_current(project, result, search, catalog_id, active)
-        attempt.update(state='done', finished_at=store.now(), remaining=len(queue(result)))
+        attempt.update(state='partial' if attempt['errors'] else 'done', finished_at=store.now(), remaining=len(queue(result)))
         with store.connect() as db:
             store.event(db, project, 'torgi_visual_ocr', {'id': result['id'], 'units': attempt['processed'], 'network_requests': 0})
-        return {'processed': attempt['processed'], 'remaining': attempt['remaining'], 'network_requests': 0}
+        return {'processed': attempt['processed'], 'received': attempt['received'], 'errors': attempt['errors'],
+                'state': attempt['state'], 'remaining': attempt['remaining'], 'network_requests': 0}
     except Exception as exc:
         attempt.update(state='error', error=str(exc)[:500], finished_at=store.now())
         raise
@@ -134,6 +161,9 @@ def preview(project, key, number=None, view=None, active=False):
         observation = next((p for p in prior.get('pages', []) if p['page'] == number and p['state'] == 'received'), None)
         if prior.get('source_sha256') != file['sha256'] or not observation:
             raise ValueError('Страница не принадлежит текущему OCR')
+        scope = image_scope(file)
+        if scope is not None and not scope_matches(observation.get('image_scope'), scope):
+            raise ValueError('Страница OCR относится к другому кадру MPO')
         path = folder(file) / f'p{number}-v{view}.png'
         digest = observation['views'][view]['image_sha256']
     if not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:

@@ -108,7 +108,7 @@ def test_actual_image_reader_downloads_once_and_never_calls_ocr(db,monkeypatch):
 def test_ocr_keeps_source_dates_text_geometry_and_lot_fields_separate(db,monkeypatch):
     f=seed(db);cache(f,texts=('90 : 12 : 172101 : 420','90:12:172101:420 and 90:12:172101:999'))
     monkeypatch.setattr(visual.ocr,'worker',lambda *a:{'name':'test','language':'ru'})
-    assert visual.run('trudovoe',{'id':'docs'})=={'processed':1,'remaining':0,'network_requests':0}
+    assert visual.run('trudovoe',{'id':'docs'})=={'processed':1,'received':1,'errors':0,'state':'done','remaining':0,'network_requests':0}
     r=store.get_setting('torgi_documents_trudovoe');a=r['files']['file']
     assert {k:v for k,v in a.items() if k!='visual_ocr'}==f
     page=a['visual_ocr']['pages'][0]
@@ -136,7 +136,9 @@ def test_retry_errors_explicit_and_corrupt_cache_never_becomes_success(db,monkey
     f=seed(db);cache(f)
     (visual.folder(f)/'p1-v0.png').write_bytes(b'tampered')
     monkeypatch.setattr(visual.ocr,'worker',lambda *a:{'name':'test'})
-    visual.run('trudovoe',{'id':'docs'});r=store.get_setting('torgi_documents_trudovoe')
+    answer=visual.run('trudovoe',{'id':'docs'});r=store.get_setting('torgi_documents_trudovoe')
+    assert answer['state']=='partial' and answer['errors']==1 and answer['received']==0
+    assert store.get_setting('torgi_visual_attempt_trudovoe')['state']=='partial'
     assert r['files']['file']['visual_ocr']['pages'][0]['state']=='error'
     assert not visual.queue(r) and len(visual.queue(r,True))==1
     assert r['files']['file']['mentions']==[] and r['files']['file']['state']=='read'
