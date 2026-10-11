@@ -11,6 +11,7 @@ from . import store, torgi
 from .network import fetch, ResponseTooLarge
 from .docx_text import ALGORITHM as DOCX_ALGORITHM
 from . import image_evidence
+from .torgi_large_pdf_worker import scope as large_pdf_scope
 from .legacy_text import ALGORITHM as LEGACY_ALGORITHM, OLE_MAGIC
 from .egrn_coordinates import PDF_ALGORITHM as ALGORITHM
 
@@ -59,6 +60,8 @@ def file_limit(fmt):
 
 def pdf_scope(file):
     """Extended OCR scope needs the source-bound successful local reading marker."""
+    if large_pdf_scope(file):
+        return 32,120
     extended=(file.get('format')=='pdf' and file.get('local_pdf_algorithm')==LOCAL_PDF_ALGORITHM
               and file.get('local_pdf_max_pages')==120 and file.get('local_pdf_source_sha256')==file.get('sha256')
               and bool(file.get('sha256')))

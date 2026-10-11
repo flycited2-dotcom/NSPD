@@ -2,7 +2,42 @@
 const reconMap=L.map('recon-map').setView([44.99335,34.20543],15);
 const reconDraw=L.featureGroup().addTo(reconMap);
 let reconOutline=null,reconResult=null,reconStale=false;
-let reconPurposeLoaded=false;
+let reconParametersLoaded=false;
+const reconParameterDirty=new Set();
+const reconParameterControls={
+ purpose:{id:'recon-purpose',kind:'purpose'},
+ target_area:{id:'recon-area-size',kind:'number',min:0,max:1e8,exclusiveMin:true},
+ min_area:{id:'survey-min',kind:'number',min:0,max:1e8,exclusiveMin:true},
+ max_area:{id:'survey-max',kind:'number',min:0,max:1e8,exclusiveMin:true},
+ min_width:{id:'survey-width',kind:'number',min:0,max:1000},
+ limit:{id:'recon-limit',kind:'number',min:1,max:20,integer:true},
+ avoid_restrictions:{id:'recon-avoid-zones',kind:'boolean'},
+ avoid_planned:{id:'recon-avoid-planned',kind:'boolean'},
+ avoid_environment:{id:'recon-avoid-environment',kind:'boolean'},
+ verify_nspd:{id:'recon-verify-nspd',kind:'boolean'}
+};
+function savedReconParameters(parameters,dirty,loaded=false){
+ const updates=[];
+ if(loaded)return {loaded:true,updates};
+ if(!parameters||typeof parameters!=='object'||Array.isArray(parameters))return {loaded:true,updates};
+ for(const [key,control] of Object.entries(reconParameterControls)){
+  if(dirty.has(control.id)||!Object.hasOwn(parameters,key))continue;
+  const value=parameters[key];
+  if(control.kind==='boolean'){
+   if(typeof value==='boolean')updates.push({id:control.id,property:'checked',value});
+  }else if(control.kind==='purpose'){
+   if(['unspecified','housing','personal_farm','agriculture'].includes(value))updates.push({id:control.id,property:'value',value});
+  }else if(typeof value==='number'&&Number.isFinite(value)
+    &&value>=control.min&&(!control.exclusiveMin||value>control.min)&&value<=control.max
+    &&(!control.integer||Number.isInteger(value)))updates.push({id:control.id,property:'value',value:String(value)});
+ }
+ return {loaded:true,updates};
+}
+function restoreReconParameters(parameters){
+ const restored=savedReconParameters(parameters,reconParameterDirty,reconParametersLoaded);
+ for(const update of restored.updates)el(update.id)[update.property]=update.value;
+ reconParametersLoaded=restored.loaded;
+}
 let reconFocus=null;
 LandBasemap.bind(reconMap,el('recon-osm'));
 const reconNames={draft:'Пробный контур',gap:'Нужно проектирование',offer:'Предложение НСПД',auction:'Аукцион / торги'};
@@ -67,7 +102,7 @@ async function refreshRecon(){
  const a=d.attempt;el('recon-status').textContent=a?`Последняя операция: ${({running:'выполняется',done:'завершена',error:'ошибка',interrupted:'прервана'})[a.state]||a.state} · ${a.step||''}${a.error?' · '+a.error:''}`:'Выделите область, задайте площадь и нажмите «Найти контуры».';
  if(reconResult){
   const r=reconResult,s=r.summary;
-  if(!reconPurposeLoaded){el('recon-purpose').value=r.parameters.purpose;reconPurposeLoaded=true}
+  restoreReconParameters(r.parameters);
   el('recon-status').textContent+=`\nРасчёт ${reconDate(r.created_at)}. Цель: ${({'housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'})[r.parameters.purpose]||'не выбрана'}. Пробных контуров: ${s.drafts}; предложений: ${s.offers}; аукционов: ${s.auctions}; промежутков для проектирования: ${s.large_gaps}. Вычтены полученные участки (${s.excluded_parcels}) и здания (${s.excluded_buildings}).\n${r.warning}${d.stale?' Источники или правила расчёта изменились; повторите расчёт.':''}${r.operation_warnings.length?'\n'+r.operation_warnings.join('\n'):''}`;
   el('recon-status').textContent+=reconRgisOmissionsText(r.sources.rgis_context);
   const dates=Object.values(r.sources.nspd).map(x=>x.received_at).filter(Boolean).sort();
@@ -112,6 +147,10 @@ for(const container of ['recon-results','recon-watch'])el(container).addEventLis
  const save=e.target.closest('[data-recon-save]');if(!save||running||!reconResult)return;save.disabled=true;
  try{await api('/api/recon/watch',{result_id:reconResult.id,id:save.dataset.reconSave});await refreshRecon()}catch(error){el('recon-status').textContent=error.message}finally{save.disabled=reconStale||!sameReconBounds()}
 });
+// Bind before the asynchronous initial result arrives so typing always wins.
+for(const control of Object.values(reconParameterControls)){
+ for(const event of ['input','change'])el(control.id).addEventListener(event,()=>reconParameterDirty.add(control.id));
+}
 refreshRecon().catch(e=>el('recon-status').textContent=e.message);
 let boundaryResult=null;
 async function refreshBoundary(){
