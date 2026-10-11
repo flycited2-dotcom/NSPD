@@ -9,14 +9,16 @@ from . import image_evidence
 from .legacy_text import doc_text, rtf_text, ALGORITHM as LEGACY_ALGORITHM
 
 
-def extract(raw,fmt):
+def extract(raw,fmt,max_pages=None):
+    if max_pages is not None and (fmt!='pdf' or max_pages!=120):
+        raise ValueError('Расширенный лимит разрешён только для PDF до 120 страниц')
     if fmt in image_evidence.FORMATS:
         png,info=image_evidence.preview(raw,fmt)
         return {'unit':'image','image':dict(info,preview_sha256=hashlib.sha256(png).hexdigest()),
                 'mentions':[],'tables':[],'geometry_confirmed':False,'georeferenced':False,
                 'text_layer_complete':False},[]
     if fmt=='pdf':
-        details,pages=municipal.pdf_text(raw,max_bytes=16*1024*1024)
+        details,pages=municipal.pdf_text(raw,max_bytes=16*1024*1024,max_pages=max_pages)
         result=schemes.apply_page_limit(schemes.extract(pages),details['processed_pages'],details['unread_pages'])
         egrn, consumed = egrn_coordinates.extract(pages)
         unparsed = [n for n,text in pages if any(schemes.PAIR.search(line) and (n,line.strip()) not in consumed

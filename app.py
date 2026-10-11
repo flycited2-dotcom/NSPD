@@ -33,7 +33,7 @@ from land import scan_tables
 from land import scan_cells,scan_source,scan_review
 from land import torgi_docs
 from land import georeference
-from land import torgi_visual
+from land import torgi_visual, torgi_pdf_local
 from land import recon, regional_documents, rgis_context, pzz_context
 
 ROOT = Path(__file__).resolve().parent
@@ -198,6 +198,7 @@ class Handler(BaseHTTPRequestHandler):
                 attempt = store.get_setting(torgi_docs.setting_key(project,regional,'_attempt'), None)
                 reading = store.get_setting(torgi.setting_key(project,regional,'_files_attempt'), None)
                 reprocessing = store.get_setting(torgi.setting_key(project,regional,'_reprocess_attempt'), None)
+                pdf_local = store.get_setting(torgi_docs.setting_key(project,regional,'_pdf_local_attempt'), None)
                 visual = store.get_setting(torgi.setting_key(project,regional,'_visual_attempt'), None)
                 search = store.get_setting(torgi.setting_key(project,regional), None)
                 with JOB_LOCK:
@@ -205,6 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                 if attempt and attempt['state']=='running' and not active:attempt=dict(attempt,state='interrupted')
                 if reading and reading['state']=='running' and not active:reading=dict(reading,state='interrupted')
                 if reprocessing and reprocessing['state']=='running' and not active:reprocessing=dict(reprocessing,state='interrupted')
+                if pdf_local and pdf_local['state']=='running' and not active:pdf_local=dict(pdf_local,state='interrupted')
                 if visual and visual['state']=='running' and not active:visual=dict(visual,state='interrupted')
                 same = torgi_docs.same_search(search,result)
                 selected = None
@@ -216,6 +218,12 @@ class Handler(BaseHTTPRequestHandler):
                                   'selected_lot_id':selected,
                                   'selected_files_remaining':len(torgi_docs.files_for_lot(torgi_docs.file_queue(result or {}),selected)) if selected else None,
                                   'selected_files_to_reprocess':len(torgi_docs.files_for_lot(torgi_docs.reprocess_queue(result or {}),selected)) if selected else None,
+                                  'pdf_local_attempt':pdf_local,
+                                  'pdf_local_summary':torgi_pdf_local.summary(result or {}),
+                                  'selected_pdf_local_summary':torgi_pdf_local.summary(result or {},selected) if selected else None,
+                                  'pdf_local_remaining':len(torgi_pdf_local.queue(result or {})),
+                                  'pdf_local_retry_remaining':len(torgi_pdf_local.queue(result or {},True)),
+                                  'selected_pdf_local_remaining':len(torgi_docs.files_for_lot(torgi_pdf_local.queue(result or {}),selected)) if selected else None,
                                   'current_search_source_id':torgi.source_id(search),'search_stale':bool(result and not same),
                                   'visual_attempt':visual,'visual_remaining':len(torgi_visual.queue(result or {})),
                                   'cards_remaining':len(torgi_docs.metadata_queue(search,result if same else {},active=regional,survey=store.get_setting('survey_'+project))) if search else 0,
@@ -408,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Чтение вложений ГИС Торги', lambda: torgi_docs.read(project, data)))
             if path == '/api/torgi/documents/reprocess':
                 return self.send(launch_job(project, 'Локальное перечтение документов торгов', lambda: torgi_docs.reprocess(project, data)))
+            if path == '/api/torgi/documents/continue':
+                return self.send(launch_job(project, 'Локальное дочитывание PDF торгов', lambda: torgi_pdf_local.run(project, data)))
             if path == '/api/torgi/documents/ocr':
                 return self.send(launch_job(project, 'Локальное OCR изображений и PDF торгов', lambda: torgi_visual.run(project, data)))
             if path == '/api/torgi/active/documents':
@@ -418,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Чтение региональных схем и документов', lambda: torgi_docs.read(project, data, active=True)))
             if path == '/api/torgi/active/documents/reprocess':
                 return self.send(launch_job(project, 'Локальное перечтение региональных документов', lambda: torgi_docs.reprocess(project, data, active=True)))
+            if path == '/api/torgi/active/documents/continue':
+                return self.send(launch_job(project, 'Локальное дочитывание региональных PDF', lambda: torgi_pdf_local.run(project, data, active=True)))
             if path == '/api/torgi/active/documents/ocr':
                 return self.send(launch_job(project, 'Локальное OCR региональных схем', lambda: torgi_visual.run(project, data, active=True)))
             if path == '/api/publications':

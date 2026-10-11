@@ -67,3 +67,32 @@ def test_collect_stops_file_batches_after_partial_and_reports_queue(workspace,mo
 def test_invalid_collection_does_not_mutate_catalog(workspace,params):
     with pytest.raises(ValueError):regional.collect('trudovoe',params)
     assert store.get_setting('torgi_active_documents_trudovoe') is None
+
+
+def test_collect_continues_cached_pdf_and_returns_unread_pages(workspace,monkeypatch):
+    regional.collect('trudovoe',{'search_id':'search'})
+    catalog=store.get_setting('torgi_active_documents_trudovoe')
+    monkeypatch.setattr(docs,'fetch',lambda *a,**k:pytest.fail('cached continuation must not use network'))
+    monkeypatch.setattr(regional.torgi_pdf_local,'queue',lambda result:[{'key':'long-pdf'}])
+    calls=[]
+    def continuation(project,params,active=False):
+        calls.append((project,params,active))
+        updated=dict(catalog,id='continued-catalog')
+        store.set_setting('torgi_active_documents_trudovoe',updated)
+        return {'processed':1,'state':'done'}
+    monkeypatch.setattr(regional.torgi_pdf_local,'run',continuation)
+    monkeypatch.setattr(regional.torgi_pdf_local,'summary',lambda result:{'remaining':0,'unread_pages':8})
+    answer=regional.collect('trudovoe',{'search_id':'search'})
+    assert calls==[('trudovoe',{'id':catalog['id']},True)]
+    assert answer['id']=='continued-catalog' and answer['pdf_local_processed']==1
+    assert answer['pdf_unread_pages']==8 and answer['pdf_local_remaining']==0
+    assert answer['network_files']==0 and not answer['geometry_confirmed']
+
+
+def test_collect_does_not_continue_local_files_after_source_access_failure(workspace,monkeypatch):
+    monkeypatch.setattr(docs,'fetch',lambda *a,**k:(_ for _ in ()).throw(ValueError('HTTP 403')))
+    monkeypatch.setattr(regional.torgi_pdf_local,'queue',lambda result:[{'key':'long-pdf'}])
+    monkeypatch.setattr(regional.torgi_pdf_local,'run',lambda *a,**k:pytest.fail('stop the automatic pipeline after source failure'))
+    monkeypatch.setattr(regional.torgi_pdf_local,'summary',lambda result:{'remaining':1,'unread_pages':15})
+    answer=regional.collect('trudovoe',{'search_id':'search'})
+    assert answer['state']=='partial' and answer['pdf_local_processed']==0

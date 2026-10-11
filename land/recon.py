@@ -365,7 +365,8 @@ def run(project,params):
             active_search=store.get_setting('torgi_active_'+project) or {}
             try:
                 documents=regional_documents.collect(project,{'search_id':active_search.get('id')})
-                if documents['state']!='done' or documents['cards_remaining'] or documents['files_remaining']:
+                if (documents['state']!='done' or documents['cards_remaining'] or documents['files_remaining']
+                        or documents.get('pdf_unread_pages',0)):
                     attempt['warnings'].append('Документы земельных лотов получены частично; оставшаяся очередь и ошибки показаны отдельно')
             except Exception as exc:attempt['warnings'].append('Документы земельных лотов не завершены; прежние датированные источники сохранены: '+str(exc)[:300])
         attempt['step']='Подбор контуров и сверка источников';store.set_setting('recon_attempt_'+project,attempt)

@@ -1,5 +1,5 @@
 """Bounded collection of current land-provision cards and their supporting files."""
-from . import store, torgi, torgi_docs
+from . import store, torgi, torgi_docs, torgi_pdf_local
 
 MAX_CARD_BATCHES = 5
 MAX_FILE_BATCHES = 4
@@ -42,8 +42,19 @@ def collect(project, params):
     catalog = store.get_setting(torgi_docs.setting_key(project, True)) or {}
     if (store.get_setting(torgi.setting_key(project, True)) or {}).get('id') != search['id']:
         raise ValueError('Региональный поиск изменился во время получения документов')
+    totals['pdf_local_processed'] = 0
+    if totals['state'] == 'done' and torgi_pdf_local.queue(catalog):
+        report = torgi_pdf_local.run(project, {'id':catalog['id']}, active=True)
+        totals['pdf_local_processed'] = report['processed']
+        if report['state'] != 'done':
+            totals['state'] = report['state']
+        catalog = store.get_setting(torgi_docs.setting_key(project, True)) or {}
+    if (store.get_setting(torgi.setting_key(project, True)) or {}).get('id') != search['id']:
+        raise ValueError('Региональный поиск изменился во время локального чтения')
+    local = torgi_pdf_local.summary(catalog)
     totals.update(id=catalog.get('id'),
                   cards_remaining=len(torgi_docs.metadata_queue(search, catalog, active=True, survey=store.get_setting('survey_' + project))),
                   files_remaining=len(torgi_docs.file_queue(catalog)),
+                  pdf_local_remaining=local['remaining'], pdf_unread_pages=local['unread_pages'],
                   geometry_confirmed=False)
     return totals

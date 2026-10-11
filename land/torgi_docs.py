@@ -19,6 +19,7 @@ FILE = 'https://torgi.gov.ru/new/file-store/v1/'
 BATCH = 5
 MAX_BYTES = 8*1024*1024
 PDF_MAX_BYTES = 16*1024*1024
+LOCAL_PDF_ALGORITHM = 'torgi-local-pdf-v1'
 READ_FORMATS = ('pdf','docx','doc','rtf',*image_evidence.FORMATS)
 
 
@@ -54,6 +55,14 @@ WARNING = 'Файлы извещения могут относиться ко м
 
 def file_limit(fmt):
     return PDF_MAX_BYTES if fmt=='pdf' else MAX_BYTES
+
+
+def pdf_scope(file):
+    """Extended OCR scope needs the source-bound successful local reading marker."""
+    extended=(file.get('format')=='pdf' and file.get('local_pdf_algorithm')==LOCAL_PDF_ALGORITHM
+              and file.get('local_pdf_max_pages')==120 and file.get('local_pdf_source_sha256')==file.get('sha256')
+              and bool(file.get('sha256')))
+    return 16,120 if extended else 40
 
 
 def validate_download(file,raw):

@@ -36,7 +36,7 @@ def queue(result, retry=False):
         prior = file.get('visual_ocr') or {}
         old = {p['page']: p for p in prior.get('pages', [])} if prior.get('source_sha256') == file['sha256'] else {}
         for number in units:
-            limit = min(file.get('processed_pages', 1), 40) if file['format'] == 'pdf' else 1
+            limit = min(file.get('processed_pages', 1), torgi_docs.pdf_scope(file)[1]) if file['format'] == 'pdf' else 1
             if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= limit:
                 raise ValueError('Недопустимая страница OCR торгов')
             item = old.get(number)
@@ -51,7 +51,7 @@ def read_unit(file, number):
     target = target_folder / f'p{number}-{ocr.ALGORITHM}.json'
     cached = target.exists()
     if not cached:
-        args = ['--pdf', str(path.resolve()), '--max-pdf-mib', '16'] if file['format'] == 'pdf' else ['--image', str(path.resolve()), '--source-format', file['format']]
+        args = ['--pdf', str(path.resolve()), '--max-pdf-mib', '16', '--max-pdf-pages', str(torgi_docs.pdf_scope(file)[1])] if file['format'] == 'pdf' else ['--image', str(path.resolve()), '--source-format', file['format']]
         ocr.worker([*args, '--sha256', file['sha256'], '--page', str(number), '--folder', str(target_folder.resolve())], 60)
     if not target.is_file() or target.stat().st_size > 4 * 1024 * 1024:
         raise ValueError('Результат OCR отсутствует или слишком велик')

@@ -2,6 +2,7 @@
 let regionalDocs=null;
 let regionalDocLots=[];
 let regionalRefresh=0;
+let regionalPdfLocalData=null;
 function regionalFileInfo(file,card){
  if(!file)return '<p>Метаданные файла ещё не получены.</p>';
  return `<p>${escapeHtml(torgiFileState(file))} · ${file.declared_size} байт<br>Скачан: ${tdate(file.received_at)}${file.sha256?'<br>SHA-256: '+escapeHtml(file.sha256):''}</p>${file.metadata_conflict?'<p>Метаданные одного файла различаются; чтение остановлено.</p>':''}${file.error?'<p>'+escapeHtml(docErrorText(file.error))+'</p>':''}${file.state==='read'?torgiFileEvidence(file,card,regionalDocLots).replaceAll('/api/torgi/documents/image','/api/torgi/active/documents/image'):''}`;
@@ -12,8 +13,10 @@ async function refreshRegionalDocs(){
  const d=await api('/api/torgi/active/documents'+(chosen?'?lot_id='+encodeURIComponent(chosen):''));
  if(request!==regionalRefresh||chosen!==el('regional-doc-lot').value)return;
  regionalDocs=d.result;
+ regionalPdfLocalData=d;
  regionalDocLots=d.comparison_lots||[];
  const r=regionalDocs,files=Object.values(r?.files||{});
+ if(typeof drawTorgiPdfLocalStatus==='function')drawTorgiPdfLocalStatus('regional-doc',d,torgiPdfLocalFiles(r,chosen),Boolean(chosen));
  let text=`Карточек ЗК осталось: ${d.cards_remaining}; файлов в очереди: ${d.files_remaining}; сканов для OCR: ${d.visual_remaining}. `;
  if(r)text+=`Получено карточек: ${r.cards.filter(c=>c.state==='received').length}; прочитано файлов: ${files.filter(f=>f.state==='read').length}; ошибки/отклонения файлов: ${files.filter(f=>['error','rejected'].includes(f.state)).length}. ${r.warning} ${d.search_stale?'Поиск изменился; нужны свежие карточки. ':''}`;
  if(d.selected_lot_id)text+=`Выбран лот ${d.selected_lot_id}: в очереди ${d.selected_files_remaining}; для локального перечтения ${d.selected_files_to_reprocess}. `;
@@ -27,20 +30,23 @@ async function refreshRegionalDocs(){
  el('regional-doc-results').innerHTML=r.cards.filter(c=>!chosen||c.lot_id===chosen).map(card=>`<details><summary>Лот ${escapeHtml(card.lot_id)} · ${card.state==='received'?'вложений: '+card.attachments.length:'карточка не получена'}</summary>${card.state==='received'?`<p><a href="${escapeHtml(card.lot_url)}" target="_blank" rel="noopener noreferrer">Официальная карточка</a> · ${tdate(card.received_at)} · ${escapeHtml(statusName(card.card_status))}</p>${card.attachments.map(a=>`<details><summary>${escapeHtml(a.file_name)} · ${a.scope==='lot'?'вложение этого лота':'общий файл извещения'}</summary><p><a href="${escapeHtml(a.url)}" target="_blank" rel="noopener noreferrer">Официальный файл</a> · ${escapeHtml(a.type_name||'тип не указан')}${a.inactive?' · неактивное вложение':''}</p>${regionalFileInfo(r.files[a.key],card)}</details>`).join('')}`:'<p>'+escapeHtml(docErrorText(card.error))+'</p>'}</details>`).join('');
 }
 async function runRegionalDocs(action='collect'){
+ if(action==='continue'&&(!regionalDocs?.id||regionalPdfLocalData?.search_stale)){el('regional-doc-status').textContent+=' Локальное дочитывание не начато: каталог или поиск изменился; обновите карточки.';return;}
  if(running)return;running=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
  el('regional-doc-lot').disabled=true;
+ if(typeof restoreTorgiPdfLocalControls==='function')restoreTorgiPdfLocalControls();
  if(action==='collect'){el('regional-doc-lot').value='';++regionalRefresh}
  try{
-  const args={retry_errors:el('regional-doc-retry').checked};
+  const args={retry_errors:el(action==='continue'?'regional-doc-pdf-local-retry':'regional-doc-retry').checked};
   if(action==='collect')args.search_id=(await api('/api/torgi/active')).result?.id;else args.id=regionalDocs?.id;
-  if(['read','reprocess'].includes(action)&&el('regional-doc-lot').value)args.lot_id=el('regional-doc-lot').value;
+  if(['read','reprocess','continue'].includes(action)&&el('regional-doc-lot').value)args.lot_id=el('regional-doc-lot').value;
   const job=await api('/api/torgi/active/documents/'+action,args);let state;
   do{await new Promise(r=>setTimeout(r,1000));state=await api('/api/jobs/'+job.job_id);await refreshRegionalDocs()}while(state.state==='running');
   if(state.state==='error')throw Error(state.error);
   await refreshRecon();
  }catch(e){el('regional-doc-status').textContent+=' Не завершено: '+e.message}
- finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);el('regional-doc-lot').disabled=false;if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
+ finally{running=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);el('regional-doc-lot').disabled=false;if(typeof restoreTorgiPdfLocalControls==='function')restoreTorgiPdfLocalControls();if(reconStale||!sameReconBounds())document.querySelectorAll('[data-recon-save]').forEach(b=>b.disabled=true)}
 }
+if(typeof installTorgiPdfLocalControls==='function')installTorgiPdfLocalControls('regional-doc',()=>runRegionalDocs('continue'));
 el('regional-doc-collect').addEventListener('click',()=>runRegionalDocs());
 el('regional-doc-read').addEventListener('click',()=>runRegionalDocs('read'));
 el('regional-doc-reprocess').addEventListener('click',()=>runRegionalDocs('reprocess'));
