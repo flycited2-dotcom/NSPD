@@ -48,6 +48,12 @@ function reconRegionalPzzText(c,source){
  else text+=' Датированные сведения источника этой версии не получены.';
  return text+' Полное покрытие, действующая редакция и допустимость использования не подтверждены. <a href="https://rgis.rk.gov.ru/map/Map.aspx#/maps/34f88ad7-6208-4f45-b29a-daabbb7119fe" target="_blank" rel="noopener noreferrer">Источник ПЗЗ</a>';
 }
+function reconRgisOmissionsText(source){
+ if(!source?.applied)return '';
+ const layers=Object.values(source.layers||{}).filter(layer=>layer.state==='partial');
+ if(!layers.length)return '';
+ return ' Генплан обработан частично: '+layers.map(layer=>`принято ${layer.accepted_count} из ${layer.received_count}, отклонено ${layer.invalid_count}`).join('; ')+'. Ошибочные объекты не исправлялись и не использованы; отсутствие пересечений не подтверждает отсутствие зон или дорог.';
+}
 function showReconCandidate(c){
  if(reconFocus)reconDraw.removeLayer(reconFocus);
  reconFocus=L.featureGroup().addTo(reconDraw);
@@ -63,6 +69,7 @@ async function refreshRecon(){
   const r=reconResult,s=r.summary;
   if(!reconPurposeLoaded){el('recon-purpose').value=r.parameters.purpose;reconPurposeLoaded=true}
   el('recon-status').textContent+=`\nРасчёт ${reconDate(r.created_at)}. Цель: ${({'housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'})[r.parameters.purpose]||'не выбрана'}. Пробных контуров: ${s.drafts}; предложений: ${s.offers}; аукционов: ${s.auctions}; промежутков для проектирования: ${s.large_gaps}. Вычтены полученные участки (${s.excluded_parcels}) и здания (${s.excluded_buildings}).\n${r.warning}${d.stale?' Источники или правила расчёта изменились; повторите расчёт.':''}${r.operation_warnings.length?'\n'+r.operation_warnings.join('\n'):''}`;
+  el('recon-status').textContent+=reconRgisOmissionsText(r.sources.rgis_context);
   const dates=Object.values(r.sources.nspd).map(x=>x.received_at).filter(Boolean).sort();
   const tileText=Object.entries(r.sources.nspd).filter(([k,v])=>v.coverage).map(([k,v])=>`${k==='parcels'?'Кадастр':'Здания'}: основной ответ ${v.coverage.parent_count}; по частям ${v.coverage.children_unique_count}; добавлено ${v.coverage.additional_ids.length}; полнота ЕГРН не подтверждена`).join('; ');
   const pzz=r.sources.nspd.pzz;const pzzText=pzz?.received_at?`Территориальные зоны НСПД: ${pzz.count??'число не установлено'} объектов · ${reconDate(pzz.received_at)}. ${pzz.count===0?'Зоны для проверки выбранного использования не получены; пустой ответ не означает отсутствие ПЗЗ.':'Действующая редакция ПЗЗ и допустимость выбранного использования требуют подтверждения.'}`:'Датированный ответ территориальных зон НСПД не получен; допустимость выбранного использования не установлена.';

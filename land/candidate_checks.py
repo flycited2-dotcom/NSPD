@@ -52,8 +52,11 @@ def _layer(label, layer, applied=True):
         return label + ': ответ не получен' + ('; ' + _text(layer['error']) if layer.get('error') else '') + '.'
     if not layer.get('received_at'):
         return label + ': датированный ответ не получен.'
-    text = label + ': получено ' + (_text(layer.get('count')) or 'число не установлено') + ' объектов; ' + _date(layer) + '.'
-    if layer.get('count') == 0:
+    observed_count = layer.get('received_count') if layer.get('state') == 'partial' else layer.get('count')
+    text = label + ': получено ' + (_text(observed_count) or 'число не установлено') + ' объектов; ' + _date(layer) + '.'
+    if layer.get('state') == 'partial':
+        text += ' Геометрия обработана частично: принято ' + _text(layer.get('accepted_count')) + ' из ' + _text(layer.get('received_count')) + '; отклонено ' + _text(layer.get('invalid_count')) + '. Ошибочные объекты не исправлялись и не использованы; отсутствие пересечений не подтверждает отсутствие зон или дорог.'
+    elif layer.get('count') == 0:
         text += ' Пустой ответ не подтверждает отсутствие объектов.'
     if layer.get('state') == 'retained':
         text += ' Использовано прежнее наблюдение; обновление не удалось.'
@@ -121,7 +124,7 @@ def assessment(candidate, result):
             zoning += ' Индекс относится к прежнему каталогу.'
     else:
         zoning += 'Индекс текста ПЗЗ не подключён.'
-    zoning_attention = bool(regulations.get('id') and not regulations.get('catalog_matches'))
+    zoning_attention = bool(regulations.get('id') and not regulations.get('catalog_matches')) or (gp_source.get('applied') is True and any(layer.get('state') == 'partial' for layer in (gp_source.get('layers') or {}).values()))
     rows.append(_row('zoning', 'Генплан, ПЗЗ и использование', 'attention' if zoning_attention else 'observed' if gp or regional or pzz_matches or counts.get('processed_pages') else 'unknown',
                      zoning, 'Установить действующую зону и подзону, применимые ВРИ, размеры и параметры для выбранной цели; подтвердить акты и изменения.', ('general_plan', 'pzz'),
                      chain((_evidence(nspd_pzz, label='ПЗЗ НСПД'), _evidence(pzz_layer, None if pzz_source.get('applied') is True else 'not_applied', label='ПЗЗ РГИС')),

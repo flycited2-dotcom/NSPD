@@ -3,11 +3,16 @@ let rgisStatusData=null;
 function drawRgisStatus(){
  if(!rgisStatusData)return;
  const d=rgisStatusData,r=d.result,a=d.attempt;
- let text=a?`Последняя проверка РГИС: ${a.state==='done'?'завершена':a.state==='running'?'выполняется':a.state==='interrupted'?'прервана':'ошибка'}${a.error?' · '+a.error:''}. `:'';
+ let text=a?`Последняя проверка РГИС: ${a.state==='done'?'завершена':a.state==='partial'?'получено частично':a.state==='running'?'выполняется':a.state==='interrupted'?'прервана':'ошибка'}${a.error?' · '+a.error:''}. `:'';
  if(r){
   const same=r.bounds.every((value,i)=>Math.abs(value-boundsInput()[i])<1e-9);
   const labels={functional:'функциональных полигонов',settlements:'полигонов населённых пунктов',roads:'дорожных контуров'};
   text+=`Карта «ГП 2019г. Симферопольский район»: ${Object.entries(r.layers).map(([mode,l])=>`${l.count} ${labels[mode]} · получено ${reconDate(l.received_at)}`).join('; ')}. ${same?'Область совпадает с выбранной.':'Полученные слои относятся к другой области.'} `;
+  for(const [mode,l] of Object.entries(r.layers))if(l.state==='partial'){
+   text+=`${labels[mode]}: принято ${l.accepted_count} из ${l.received_count}, отклонено ${l.invalid_count}. `;
+   for(const rejected of (l.rejected_geometries||[]).slice(0,20))text+=`${rejected.id}: ${rejected.reason}. `;
+   text+='Ошибочные геометрии не исправлялись и не использованы; отсутствие совпадений не подтверждает отсутствие зон или дорог. ';
+  }
   if(Object.values(r.layers).some(l=>l.server_clock_warning))text+='Часы источника расходятся с временем получения; дата ответа не принята как дата актуальности. ';
   text+=r.warning+' После обновления пересчитайте контуры; можно отключить сетевые обновления НСПД и торгов.';
  }else text+='Генплан РГИС ещё не получен. Это отдельный источник; действующие территориальные зоны ПЗЗ он не подтверждает.';

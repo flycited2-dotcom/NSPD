@@ -8,12 +8,13 @@ from datetime import datetime
 from urllib.parse import urlencode
 
 from shapely.geometry import box, mapping, shape
-from shapely.ops import unary_union
+from shapely.validation import explain_validity
 
 from . import network, nspd, store
 from .geometry import convert
 
-VERSION=1
+VERSION=2
+SUPPORTED_VERSIONS=(1,VERSION)
 WFS='https://rgis.rk.gov.ru/geoserver/wfs'
 MAP='https://rgis.rk.gov.ru/map/Map.aspx#/maps/00404cd9-ad64-4ab7-9ccc-bb3b2dda915e'
 TITLES={'functional':'Функциональные зоны генплана','settlements':'Населённые пункты генплана','roads':'Дорожные контуры генплана'}
@@ -50,7 +51,51 @@ def _count(value):
     return value
 
 
-def normalize(data,bounds,mode):
+def _coordinates(geom,budget):
+    """Validate polygon structure and all coordinates before any quarantine."""
+    polygons=geom.get('coordinates')
+    if geom['type']=='Polygon':polygons=[polygons]
+    else:budget+=1  # Count the MultiPolygon root, preserving the prior coordinate budget.
+    if not isinstance(polygons,(list,tuple)) or not polygons:
+        raise ValueError('Некорректные координаты РГИС')
+    for polygon in polygons:
+        budget+=1
+        if not isinstance(polygon,(list,tuple)) or not polygon:
+            raise ValueError('Некорректные координаты РГИС')
+        for ring in polygon:
+            budget+=1
+            if not isinstance(ring,(list,tuple)) or len(ring)<4:
+                raise ValueError('Некорректное кольцо геометрии РГИС')
+            for point in ring:
+                budget+=1
+                if budget>MAX_COORDINATES:
+                    raise ValueError('Превышен предел координат РГИС')
+                if (not isinstance(point,(list,tuple)) or len(point)!=2
+                        or any(isinstance(value,bool) or not isinstance(value,(int,float))
+                               or not math.isfinite(value) or abs(value)>20040000 for value in point)):
+                    raise ValueError('Некорректные координаты EPSG:3857 РГИС')
+            if ring[0]!=ring[-1]:
+                raise ValueError('Незамкнутое кольцо геометрии РГИС')
+    return budget
+
+
+def _properties(props):
+    if not isinstance(props,dict):
+        raise ValueError('Некорректные свойства РГИС')
+    # Validate every source property, including discarded fields. A damaged
+    # record cannot hide a structural/size problem behind invalid topology.
+    for key,value in props.items():
+        if (not isinstance(key,str) or len(key)>2000
+                or value is not None and (
+                    not isinstance(value,(str,int,float,bool))
+                    or isinstance(value,str) and len(value)>2000
+                    or isinstance(value,float) and not math.isfinite(value))):
+            raise ValueError('Некорректное значение свойства РГИС')
+    return {key:copy.deepcopy(props[key]) for key in FIELDS if key in props}
+
+
+def _normalize(data,bounds,mode,allow_invalid_geometry):
+    parameters(bounds,mode)  # Shared bounded area validation; no network.
     if not isinstance(data,dict) or data.get('type')!='FeatureCollection' or not isinstance(data.get('features'),list):
         raise ValueError('РГИС не вернула GeoJSON FeatureCollection')
     features=data['features'];count=len(features)
@@ -64,35 +109,56 @@ def normalize(data,bounds,mode):
     if crs is not None and crs!={'type':'name','properties':{'name':'urn:ogc:def:crs:EPSG::3857'}}:
         raise ValueError('Система координат ответа РГИС отличается от EPSG:3857')
     if count and crs is None:raise ValueError('Для геометрии РГИС не указана система координат')
-    query=convert(box(*bounds),4326,3857);seen=set();result=[];budget=0
+    query=convert(box(*bounds),4326,3857);seen=set();result=[];rejected=[];budget=0
     for f in features:
-        if not isinstance(f,dict) or not isinstance(f.get('id'),str) or not f['id'] or len(f['id'])>200 or f['id'] in seen:
+        if (not isinstance(f,dict) or f.get('type')!='Feature' or not isinstance(f.get('id'),str)
+                or not f['id'] or len(f['id'])>200 or f['id'] in seen):
             raise ValueError('Некорректный/повторный ID объекта РГИС')
-        if not f['id'].startswith(TYPES[mode]+'.'):raise ValueError('Ответ РГИС относится к другому слою')
+        prefix=TYPES[mode]+'.'
+        if not f['id'].startswith(prefix) or len(f['id'])==len(prefix):
+            raise ValueError('Ответ РГИС относится к другому слою')
         seen.add(f['id']);geom=f.get('geometry')
         if not isinstance(geom,dict) or geom.get('type') not in ('Polygon','MultiPolygon'):
             raise ValueError('Ожидалась полигональная геометрия РГИС')
-        stack=[geom.get('coordinates')]
-        while stack:
-            item=stack.pop();budget+=1
-            if budget>MAX_COORDINATES:raise ValueError('Превышен предел координат РГИС')
-            if not isinstance(item,(list,tuple)) or not item:raise ValueError('Некорректные координаты РГИС')
-            if isinstance(item[0],(list,tuple)):stack.extend(item);continue
-            if len(item)!=2 or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or abs(v)>20040000 for v in item):
-                raise ValueError('Некорректные координаты EPSG:3857 РГИС')
+        budget=_coordinates(geom,budget)
+        fields=_properties(f.get('properties'))
         g=shape(geom)
-        if g.is_empty or not g.is_valid or not g.intersects(query):raise ValueError('Невалидная или не относящаяся к области геометрия РГИС')
-        props=f.get('properties')
-        if not isinstance(props,dict):raise ValueError('Некорректные свойства РГИС')
-        fields={key:copy.deepcopy(props[key]) for key in FIELDS if key in props}
-        for value in fields.values():
-            if (value is not None and (not isinstance(value,(str,int,float,bool)) or isinstance(value,str) and len(value)>2000
-                                      or isinstance(value,float) and not math.isfinite(value))):
-                raise ValueError('Некорректное значение свойства РГИС')
+        if g.is_empty or not g.intersects(query):
+            raise ValueError('Невалидная или не относящаяся к области геометрия РГИС')
+        if not g.is_valid:
+            if not allow_invalid_geometry:
+                raise ValueError('Невалидная или не относящаяся к области геометрия РГИС')
+            digest=hashlib.sha256(json.dumps(geom,sort_keys=True,separators=(',',':'),
+                                            ensure_ascii=False,allow_nan=False).encode('utf-8')).hexdigest()
+            rejected.append({'id':f['id'],'reason':explain_validity(g),
+                             'original_geometry_sha256':digest,'geometry_digest_encoding':'canonical-json',
+                             'original_crs':'EPSG:3857','bounds':list(g.bounds),
+                             'geometry_repaired':False})
+            continue
         world=convert(g,3857,4326)
         if not world.is_valid:raise ValueError('Не удалось преобразовать геометрию РГИС')
         result.append({'type':'Feature','id':f['id'],'geometry':mapping(world),'properties':fields})
-    return {'type':'FeatureCollection','features':result}
+    warnings=[]
+    if rejected:
+        warnings.append(f'Из {count} полученных объектов РГИС принято {len(result)}, '
+                        f'невалидная геометрия {len(rejected)} исключена из геометрических операций '
+                        'без исправления. Наблюдение частичное; отсутствие совпадений не подтверждает отсутствие зон или дорог.')
+        if not result:
+            warnings.append('Пригодная геометрия не получена: все объекты отклонены. Это не пустой ответ источника.')
+    return {'geojson':{'type':'FeatureCollection','features':result},
+            'received_count':count,'accepted_count':len(result),'invalid_count':len(rejected),
+            'rejected_geometries':rejected,'state':'partial' if rejected else 'done',
+            'geometry_processing_complete':not rejected,'warnings':warnings}
+
+
+def normalize(data,bounds,mode):
+    """Strict compatibility API: any invalid source geometry rejects the response."""
+    return _normalize(data,bounds,mode,False)['geojson']
+
+
+def normalize_partial(data,bounds,mode):
+    """Explicitly quarantine topology defects; structural/source errors still fail closed."""
+    return _normalize(data,bounds,mode,True)
 
 
 def collect(bounds):
@@ -103,7 +169,8 @@ def collect(bounds):
         if status!=200:raise ValueError('РГИС не вернула полный HTTP200 ответ')
         digest=hashlib.sha256(raw).hexdigest();folder=store.DATA/'rgis'/'raw';folder.mkdir(parents=True,exist_ok=True)
         store.atomic_write(folder/(digest+'.json'),raw)
-        received=store.now();data=json.loads(raw);fc=normalize(data,bounds,mode)
+        received=store.now();data=json.loads(raw);observation=normalize_partial(data,bounds,mode)
+        fc=observation['geojson']
         server_time=data.get('timeStamp');clock_warning=False
         try:clock_warning=datetime.fromisoformat(server_time.replace('Z','+00:00'))>datetime.fromisoformat(received)
         except (ValueError,TypeError,AttributeError):clock_warning=bool(server_time)
@@ -112,10 +179,15 @@ def collect(bounds):
                       'geojson':fc,'response_counts':{key:data[key] for key in ('totalFeatures','numberMatched','numberReturned')},
                       'server_timestamp':server_time,'server_clock_warning':clock_warning,
                       'response_count_consistent':True,'coverage_confirmed':False,'currentness_confirmed':False,
-                      'source_crs_confirmed':data.get('crs') is not None,'requested_crs':'EPSG:3857','normalized_crs':'EPSG:4326'}
+                      'territorial_zone_confirmed':False,'used_for_exclusion':False,
+                      'source_crs_confirmed':data.get('crs') is not None,'requested_crs':'EPSG:3857','normalized_crs':'EPSG:4326',
+                      **{key:value for key,value in observation.items() if key!='geojson'}}
         if mode!='roads':time.sleep(.8)
+    warnings=[TITLES[mode]+': '+warning for mode,layer in layers.items() for warning in layer['warnings']]
     result={'version':VERSION,'created_at':store.now(),'bounds':list(bounds),'catalog':copy.deepcopy(CATALOG),'layers':layers,
-            'warning':WARNING,'territorial_zone_confirmed':False,'currentness_confirmed':False}
+            'state':'partial' if warnings else 'done','warnings':warnings,
+            'warning':WARNING,'territorial_zone_confirmed':False,'currentness_confirmed':False,
+            'coverage_confirmed':False,'used_for_exclusion':False}
     result['id']=hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()[:20]
     return result
 
@@ -131,16 +203,21 @@ def run(project,params):
             folder=store.DATA/'rgis';folder.mkdir(parents=True,exist_ok=True)
             store.atomic_write(folder/(result['id']+'.json'),json.dumps(result,ensure_ascii=False).encode('utf-8'))
             store.set_setting('rgis_context_'+project,result)
-            with store.connect() as db:store.event(db,project,'rgis_context',{'id':result['id'],'bounds':bounds,'counts':{mode:l['count'] for mode,l in result['layers'].items()}})
-        attempt.update(state='done',finished_at=store.now(),result_id=result['id'])
-        return {'id':result['id'],'counts':{mode:l['count'] for mode,l in result['layers'].items()}}
+            with store.connect() as db:store.event(db,project,'rgis_context',{'id':result['id'],'bounds':bounds,
+                'state':result['state'],'counts':{mode:l['count'] for mode,l in result['layers'].items()},
+                'invalid_counts':{mode:l['invalid_count'] for mode,l in result['layers'].items()}})
+        attempt.update(state=result['state'],finished_at=store.now(),result_id=result['id'],warnings=result['warnings'])
+        return {'id':result['id'],'state':result['state'],'warnings':result['warnings'],
+                'counts':{mode:l['count'] for mode,l in result['layers'].items()},
+                'invalid_counts':{mode:l['invalid_count'] for mode,l in result['layers'].items()}}
     except Exception as exc:
         attempt.update(state='error',finished_at=store.now(),error=str(exc)[:500]);raise
     finally:store.set_setting('rgis_attempt_'+project,attempt)
 
 
 def applicable(context,bounds):
-    return bool(context and context.get('version')==VERSION and context.get('bounds')==bounds)
+    return bool(context and isinstance(context.get('version'),int) and not isinstance(context.get('version'),bool)
+                and context.get('version') in SUPPORTED_VERSIONS and context.get('bounds')==bounds)
 
 
 def projected(context,bounds,metric):
@@ -157,11 +234,31 @@ def relate(g,entries,context):
             layer=context['layers'][mode]
             result[mode].append({'id':f['id'],'fields':copy.deepcopy(f['properties']),'area_m2':round(area,2),
                                  'spatially_covers':other.covers(g),'source':WFS,'received_at':layer['received_at'],
-                                 'sha256':layer['sha256'],'currentness_confirmed':False,'territorial_zone_confirmed':False})
+                                 'sha256':layer['sha256'],'currentness_confirmed':False,'territorial_zone_confirmed':False,
+                                 'coverage_confirmed':False,'used_for_exclusion':False,
+                                 'source_state':layer.get('state','unknown_legacy'),
+                                 'source_invalid_count':layer.get('invalid_count')})
     return result
 
 
 def sources(context,bounds):
-    return {'id':(context or {}).get('id'),'applied':applicable(context,bounds),'warning':WARNING,
-            'catalog':copy.deepcopy((context or {}).get('catalog')),
-            'layers':{mode:{key:copy.deepcopy(value) for key,value in layer.items() if key!='geojson'} for mode,layer in (context or {}).get('layers',{}).items()}}
+    layers={}
+    for mode,layer in (context or {}).get('layers',{}).items():
+        observed={key:copy.deepcopy(value) for key,value in layer.items() if key!='geojson'}
+        observed.setdefault('state','unknown_legacy')
+        observed.setdefault('geometry_processing_complete',None)
+        observed.setdefault('received_count',None)
+        observed.setdefault('accepted_count',layer.get('count'))
+        observed.setdefault('invalid_count',None)
+        observed.setdefault('rejected_geometries',[])
+        observed.setdefault('warnings',[])
+        observed.update(coverage_confirmed=False,currentness_confirmed=False,
+                        territorial_zone_confirmed=False,used_for_exclusion=False)
+        layers[mode]=observed
+    return {'id':(context or {}).get('id'),'version':(context or {}).get('version'),
+            'applied':applicable(context,bounds),'warning':WARNING,
+            'state':(context or {}).get('state','unknown_legacy'),
+            'warnings':copy.deepcopy((context or {}).get('warnings',[])),
+            'coverage_confirmed':False,'currentness_confirmed':False,
+            'territorial_zone_confirmed':False,'used_for_exclusion':False,
+            'catalog':copy.deepcopy((context or {}).get('catalog')),'layers':layers}

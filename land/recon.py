@@ -15,7 +15,7 @@ from .geometry import convert, polygons
 from .review import CHECKS
 from . import regional_documents, access_evidence, rgis_context, pzz_context, candidate_checks
 
-VERSION=13
+VERSION=14
 KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context','pzz_context')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
@@ -475,6 +475,22 @@ def regional_pzz_section(result,candidate):
             +'<p>'+status+'</p><p>'+esc(pzz_context.WARNING)+'</p><ul>'+(''.join(rows) or '<li>Пересечения с полученными зонами не установлены.</li>')+'</ul>')
 
 
+def rgis_omissions_section(result):
+    """Render omitted source geometry from the frozen snapshot, without repair."""
+    source=result.get('sources',{}).get('rgis_context') or {}
+    if not source.get('applied'):
+        return '<p>Справочный генплан этой области не применён или не получен.</p>'
+    esc=lambda value:html.escape(str('—' if value is None else value),quote=True)
+    blocks=[]
+    for mode,layer in source.get('layers',{}).items():
+        if layer.get('state')!='partial':continue
+        records=layer.get('rejected_geometries') or []
+        rows=''.join('<li>'+esc(item.get('id'))+' · '+esc(item.get('reason'))+' · SHA-256 исходной геометрии '+esc(item.get('original_geometry_sha256'))+'</li>' for item in records[:20])
+        blocks.append('<p>'+esc(rgis_context.TITLES.get(mode,mode))+': геометрия обработана частично. Принято '+esc(layer.get('accepted_count'))+' из '+esc(layer.get('received_count'))+'; отклонено '+esc(layer.get('invalid_count'))+'. Ошибочные объекты не исправлялись и не использованы. Отсутствие пересечений не подтверждает отсутствие зон или дорог.</p><ul>'+rows+'</ul>'
+                      +('<p>Показаны первые20отклонённых объектов; полный перечень в источниках и экспорте.</p>' if len(records)>20 else ''))
+    return ''.join(blocks)
+
+
 def access_section(candidate):
     observation=candidate.get('access_evidence')
     if not observation:return '<h3>Наблюдение по направлению к дороге</h3><p>В этой версии не рассчитывалось.</p>'
@@ -529,7 +545,7 @@ def html_report(data,candidate_id=None):
                       +'<p>До полученного кадастрового контура дорожного назначения: '+esc((c.get('road_proximity') or {}).get('distance_m'))+' м. Расстояние не подтверждает законный подъезд.</p>'
                       +access_section(c)
                       +regional_pzz_section(result,c)
-                      +'<h3>Независимый контекст генплана РГИС</h3><p>'+esc(rgis_context.WARNING)+'</p><p><a href="'+esc(rgis_context.MAP)+'">Официальная карта РГИС</a></p><ul>'+(''.join(gp_rows) or '<li>Совпадения не получены для этой версии/области. Это не подтверждает отсутствие функциональных зон или дорог.</li>')+'</ul>'
+                      +'<h3>Независимый контекст генплана РГИС</h3><p>'+esc(rgis_context.WARNING)+'</p>'+rgis_omissions_section(result)+'<p><a href="'+esc(rgis_context.MAP)+'">Официальная карта РГИС</a></p><ul>'+(''.join(gp_rows) or '<li>Совпадения не получены для этой версии/области. Это не подтверждает отсутствие функциональных зон или дорог.</li>')+'</ul>'
                       +'<h3>Особенности</h3><ul>'+''.join('<li>'+esc(f)+'</li>' for f in c['flags'])+'</ul><h3>Полученные совпадения</h3><ul>'+(''.join(evidence) or '<li>Совпадения не установлены. Это не подтверждение отсутствия процедур или ограничений.</li>')+'</ul>'
                       +'<h3>Ближайшие полученные участки</h3><ul>'+''.join('<li>'+esc(n['fields'].get('cad_num',n['id']))+' · '+esc(n['distance_m'])+' м · '+esc(json.dumps(n['fields'],ensure_ascii=False))+'</li>' for n in c['neighbours'])+'</ul>'
                       +planning_regulations.dossier_section(result)
