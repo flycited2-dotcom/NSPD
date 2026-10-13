@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from land import attachment_context as context, archive_evidence, image_evidence, store, torgi_docs as docs
+from land import attachment_context as context, archive_evidence, egrn_xml, image_evidence, store, torgi_docs as docs
 from land import torgi_archives as archives, torgi_image_frames as frames
 
 DATE = '2026-10-11T12:00:00+00:00'
@@ -58,6 +58,7 @@ def seed(active=True):
               'archive_sha256': receipt['sha256'], 'observation_id': observation_id,
               'archive_complete': False, 'ocr_performed': False, 'geometry_confirmed': False, 'georeferenced': False,
               'pdf_max_pages': 40, 'member_max_bytes': archive_evidence.MAX_MEMBER_BYTES,
+              'xml_max_bytes': egrn_xml.MAX_BYTES,
               'manifest': {'algorithm': archive_evidence.ALGORITHM, 'archive_sha256': receipt['sha256'],
                            'size': 512, 'entry_count': 2, 'entries': manifest_entries},
               'entries': rows, 'state': 'partial',
@@ -86,6 +87,39 @@ def record(values):
 
 def auxiliary(values):
     return next(iter(values['torgi_active_documents_image_frames']['entries'].values()))['frames']['1']
+
+
+def seed_xml():
+    values = seed()
+    source = ('<extract_about_property_land><details_request><owner>' + PRIVATE
+        + '</owner></details_request><land_record><object><common_data>'
+        '<cad_number>90:12:040101:23</cad_number></common_data></object>'
+        '<contours_location><contours><contour><entity_spatial><sk_id>' + PRIVATE
+        + '</sk_id><spatials_elements><spatial_element><ordinates>'
+        + ''.join('<ordinate><x>'+x+'</x><y>'+y+'</y></ordinate>' for x, y in
+            [('5000000.12345', '6000000.54321'), ('5000010.12345', '6000000.54321'),
+             ('5000010.12345', '6000010.54321'), ('5000000.12345', '6000010.54321'),
+             ('5000000.12345', '6000000.54321')])
+        + '</ordinates></spatial_element></spatials_elements></entity_spatial></contour>'
+        '</contours></contours_location></land_record></extract_about_property_land>').encode()
+    details = egrn_xml.extract(source)
+    observed = record(values)
+    before, row = observed['manifest']['entries'][0], observed['entries'][0]
+    before.update(format='xml', name=PRIVATE + '.xml', size=len(source), compressed_size=200, compression=8)
+    row.update(before)
+    row.update(state='read', sha256=details['source_sha256'], actual_size=len(source),
+        evidence={'algorithm': egrn_xml.ALGORITHM, 'details': details,
+                  'geometry_confirmed': False, 'georeferenced': False})
+    row['association_reference']['member_sha256'] = details['source_sha256']
+    seal_xml(observed)
+    return values
+
+
+def seal_xml(observed):
+    evidence = observed['entries'][0]['evidence']
+    encoded = json.dumps(evidence['details'], sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()
+    evidence.update(whitelist_cache_sha256=archives._hash(evidence['details']), whitelist_cache_size=len(encoded))
+    reseal(observed)
 
 
 def test_snapshot_is_pure_and_contains_only_dated_current_metadata(monkeypatch):
@@ -292,3 +326,75 @@ def test_file_projection_is_bounded_without_silently_claiming_complete_coverage(
     assert result['declared_files'] == context.MAX_FILES + 3 and result['omitted_files'] == 3
     assert result['counts']['pending'] == context.MAX_FILES
     assert result['counts']['accepted_observations'] == 0 and not result['coverage_confirmed']
+
+
+def test_xml_metadata_exposes_only_unconfirmed_number_counts_and_whitelist_receipt():
+    values = seed_xml()
+    result = context.snapshot(values)
+    archive = result['groups']['regional_active']['archives']['files'][0]
+    assert result['algorithm'] == 'attachment-context-v2'
+    assert archive['accepted_observation'] and archive['state'] == 'partial'
+    assert archive['counts']['incomplete'] == 1
+    member = archive['members'][0]
+    assert member['format'] == 'xml' and member['evidence_algorithm'] == egrn_xml.ALGORITHM
+    assert member['number_hints'] == [{'cadastral_number': '90:12:40101:23', 'verification_required': True}]
+    xml = member['xml_observation']
+    assert xml['received_contour_count'] == xml['accepted_contour_count'] == 1
+    assert xml['received_point_count'] == xml['accepted_point_count'] == 5
+    assert xml['all_contours_accepted'] and xml['number_hint_basis'] == 'land_record_object'
+    assert xml['whitelist_cache_sha256'] == record(values)['entries'][0]['evidence']['whitelist_cache_sha256']
+    assert xml['coordinate_order'] == 'source_x_y'
+    assert all(xml[key] is False for key in (*context.FLAGS, 'coordinate_system_confirmed',
+        'complete_source', 'free_land_confirmed', 'legal_claims_confirmed'))
+    assert not member['reading_complete_observed'] and member['text_cache_sha256'] is None
+    serialized = json.dumps(result)
+    for forbidden in (PRIVATE, '5000000.12345', '6000000.54321', 'source_crs_raw',
+                      'points_xy', 'raw_points_xy', 'owner', 'details_request'):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize('change', ['source_sha', 'source_bytes', 'root_type', 'foreign_field',
+    'geometry', 'rights', 'complete', 'row_complete', 'accepted_bool', 'contour_count',
+    'point_count', 'all_contours', 'number', 'cache_hash', 'cache_size', 'cache_size_bool',
+    'raw_cache', 'wrong_xml_limit'])
+def test_xml_snapshot_rejects_foreign_scope_unbounded_or_private_injected_metadata(change):
+    values = seed_xml()
+    observed = record(values)
+    row = observed['entries'][0]
+    evidence, details = row['evidence'], row['evidence']['details']
+    if change == 'source_sha': details['source_sha256'] = 'e' * 64
+    elif change == 'source_bytes': details['source_bytes'] += 1
+    elif change == 'root_type': details['root_type'] = 'extract_about_property_building'
+    elif change == 'foreign_field': details['owner'] = PRIVATE
+    elif change == 'geometry': details['geometry_confirmed'] = True
+    elif change == 'rights': details['rights_confirmed'] = True
+    elif change == 'complete': details['complete_source'] = True
+    elif change == 'row_complete': row['reading_complete'] = True
+    elif change == 'accepted_bool': details['accepted_contour_count'] = True
+    elif change == 'contour_count': details['received_contour_count'] = egrn_xml.MAX_CONTOURS + 1
+    elif change == 'point_count': details['accepted_point_count'] = details['received_point_count'] + 1
+    elif change == 'all_contours': details['all_contours_accepted'] = False
+    elif change == 'number': details['cadastral_number'] = PRIVATE
+    elif change == 'raw_cache': evidence['raw_xml'] = PRIVATE
+    elif change == 'wrong_xml_limit': observed['xml_max_bytes'] = True
+    seal_xml(observed)
+    if change == 'cache_hash': evidence['whitelist_cache_sha256'] = 'e' * 64
+    elif change == 'cache_size': evidence['whitelist_cache_size'] += 1
+    elif change == 'cache_size_bool': evidence['whitelist_cache_size'] = True
+    reseal(observed)
+    result = group(values)['archives']
+    assert result['counts']['accepted_observations'] == 0
+    assert result['files'][0]['state'] == 'unaccepted' and result['files'][0]['members'] == []
+    assert PRIVATE not in json.dumps(result)
+
+
+def test_xml_v1_archive_is_not_silently_reinterpreted_as_v2_evidence():
+    values = seed_xml()
+    observed = record(values)
+    observed['algorithm'] = 'torgi-archive-members-v1'
+    observed['manifest']['algorithm'] = 'archive-evidence-v1'
+    observed.pop('xml_max_bytes')
+    reseal(observed)
+    result = group(values)['archives']
+    assert result['counts']['accepted_observations'] == result['counts']['members_read'] == 0
+    assert result['files'][0]['members'] == []

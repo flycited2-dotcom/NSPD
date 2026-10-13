@@ -15,14 +15,15 @@ import zipfile
 import zlib
 
 
-ALGORITHM = 'archive-evidence-v1'
+ALGORITHM = 'archive-evidence-v2'
 MAX_BYTES = 32 * 1024 * 1024
 MAX_ENTRIES = 64
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_XML_BYTES = 2 * 1024 * 1024
 MAX_RATIO = 100
 MAX_NAME = 1024
-READ_FORMATS = ('pdf', 'docx', 'doc', 'rtf', 'jpg', 'jpeg', 'png')
+READ_FORMATS = ('pdf', 'docx', 'doc', 'rtf', 'jpg', 'jpeg', 'png', 'xml')
 COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
 _DEVICE = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)', re.I)
 _SIGNATURES = {
@@ -183,8 +184,11 @@ def inspect(raw):
     for header in headers:
         name = header['name']
         fmt = name.rsplit('/', 1)[-1].rsplit('.', 1)[-1].lower() if '.' in name.rsplit('/', 1)[-1] else ''
-        state = 'directory' if header['directory'] else 'ready' if fmt in READ_FORMATS else 'unsupported'
+        xml_oversized = fmt == 'xml' and header['size'] > MAX_XML_BYTES
+        state = ('directory' if header['directory'] else 'ready'
+                 if fmt in READ_FORMATS and not xml_oversized else 'unsupported')
         reason = ('Каталог; содержимое не читается' if header['directory'] else '' if state == 'ready'
+                  else 'XML превышает отдельный лимит 2 МиБ; содержимое не читается' if xml_oversized
                   else 'Вложенные архивы не читаются' if fmt in ('zip', 'zipx', '7z', 'rar', 'tar', 'gz')
                   else 'Формат не поддержан; содержимое не читается и не исполняется')
         identity = archive_sha256 + '\0' + header['original_name'] + '\0' + str(header['header_offset'])
@@ -276,7 +280,10 @@ def read_member(raw, identifier):
         content = _read_content(raw, headers[index])
     except zlib.error as exc:
         raise ValueError('ZIP: не удалось проверить данные записи: ' + str(exc)[:200]) from exc
-    if not content.startswith(_SIGNATURES[entry['format']]):
+    xml_prefix = content.removeprefix(b'\xef\xbb\xbf').lstrip(b' \t\r\n')
+    matches_format = (xml_prefix.startswith(b'<') if entry['format'] == 'xml'
+                      else content.startswith(_SIGNATURES[entry['format']]))
+    if not matches_format:
         _reject('содержимое не соответствует формату записи')
     digest = hashlib.sha256(content).hexdigest()
     if expected is not None and digest != expected:

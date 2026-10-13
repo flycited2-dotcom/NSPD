@@ -20,7 +20,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const frameKey='c'.repeat(24),retryFrameKey='d'.repeat(24);
 const payload=(remaining,lot='',extra={})=>({result:{id:'catalog'},selected_lot_id:lot,
  search_stale:false,large_pdf_summary:{remaining,retry_remaining:remaining},
- archive_summary:{archive_count:2,remaining:2,retry_remaining:3},
+ archive_summary:{archive_count:2,remaining:2,retry_remaining:3,pending_cached:2,xml_members_read:1,xml_contours:1},
  image_frames_summary:{received:1,remaining:2,retry_remaining:3},
  image_frames_queue:[{file_key:frameKey,frames:[1,2]}],
  image_frames_retry_queue:[{file_key:retryFrameKey,frames:[1,2,3]}],...extra});
@@ -123,6 +123,9 @@ function fixture(handler){
   assert.equal(f.el('regional-doc-large-pdf').disabled,true);
   assert.equal(f.el('regional-doc-'+action).disabled,false);
   assert.ok(f.el('regional-doc-extra-status').textContent.includes('OCR дополнительных кадров и сканов ZIP не выполнено'));
+  assert.ok(f.el('regional-doc-extra-status').textContent.includes('ZIP для перечтения из кэша после обновления: 2'));
+  assert.ok(f.el('regional-doc-extra-status').textContent.includes('XML: прочитано выбранных полей 1; исходных контуров 1'));
+  assert.ok(f.el('regional-doc-extra-status').textContent.includes('XML не используется для исключения земли'));
   assert.equal(f.el('regional-doc-archives-report').href,base+'/archives/report?lot_id=LOT-A');
   assert.equal(f.el('regional-doc-frames-export').href,base+'/frames/export?lot_id=LOT-A');
   await f.context.runTorgiExtra('regional-doc',base,action);

@@ -15,7 +15,7 @@ from .geometry import convert, polygons
 from .review import CHECKS
 from . import regional_documents, access_evidence, rgis_context, pzz_context, candidate_checks, attachment_context
 
-VERSION=15
+VERSION=16
 KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context','pzz_context','torgi_archives','torgi_active_archives','torgi_documents_image_frames','torgi_active_documents_image_frames')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'

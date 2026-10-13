@@ -48,6 +48,7 @@ async function refreshTorgiExtra(prefix,base){
  const archives=data.archive_summary||{},frames=data.image_frames_summary||{};
  const status=el(prefix+'-extra-status');
  status.textContent=`Крупные PDF: прочитано ${summary.read_files??0}; осталось ${torgiExtraRemaining(data,'large-pdf',false)}; для явного повтора ${torgiExtraRemaining(data,'large-pdf',true)}. До 32 МБ и 120 страниц; сканы читаются отдельно кнопкой OCR. ZIP: в каталоге ${archives.archive_count??0}; осталось ${torgiExtraRemaining(data,'archives',false)}; для явного повтора ${torgiExtraRemaining(data,'archives',true)}. Дополнительные кадры MPO: получено ${frames.received??0}; осталось ${torgiExtraRemaining(data,'frames',false)}; для явного повтора ${torgiExtraRemaining(data,'frames',true)}. OCR дополнительных кадров и сканов ZIP не выполнено; они не добавляются в геометрию. Это не подтверждает геопривязку или права.`;
+ status.textContent+=` ZIP для перечтения из кэша после обновления: ${archives.pending_cached??0}. XML: прочитано выбранных полей ${archives.xml_members_read??0}; исходных контуров ${archives.xml_contours??0}. Система координат не подтверждена; XML не используется для исключения земли.`;
  for(const [label,attempt] of [['Крупный PDF',data.large_pdf_attempt],['ZIP',archives.attempt||data.archive_attempt],['Кадры MPO',data.image_frames_attempt]]){
   if(!attempt)continue;
   status.textContent+=` ${label}: ${operationState(attempt.state)}; обработано ${attempt.processed??0}/${attempt.requested??0}, ошибок ${attempt.errors??0}.`;

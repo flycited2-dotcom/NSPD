@@ -8,17 +8,21 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from . import archive_evidence, store, torgi, torgi_docs
+from . import archive_evidence, egrn_xml, store, torgi, torgi_docs
 from .network import fetch
-from .torgi_archive_worker import ALGORITHM, MAX_OUTPUT, MAX_TEXT, algorithm as member_algorithm
+from .torgi_archive_worker import (ALGORITHM, MAX_OUTPUT, MAX_TEXT,
+                                  algorithm as member_algorithm, xml_whitelist_bytes)
 
 
 ROOT = Path(__file__).resolve().parent.parent
 WARNING = ('Архив прочитан в пределах 64 записей, 16 МиБ на запись, 64 МиБ суммарно и 40 страниц PDF. '
+           'Для XML до 2 МиБ читаются только выбранные поля ЕГРН; исходные XY и система координат не подтверждены. '
            'Неподдержанные записи и пропуски остаются видимыми. OCR, подписи, действительность условий, '
            'геометрия и принадлежность упомянутых объектов предмету лота не подтверждены.')
 HEX = re.compile(r'[0-9a-f]{64}')
 MAX_SNAPSHOT = 8 * 1024 * 1024
+PREVIOUS_ALGORITHMS = ('torgi-archive-members-v1',)
+MAX_XML_REPORT_POINTS = 100
 
 
 def setting_key(project, active=True, suffix=''):
@@ -162,7 +166,17 @@ def queue(search, catalog, records, retry_errors=False, active=True, lot_id=None
                                           for row in item['associations']):
             continue
         previous = records.get(item['binding_id'])
-        if previous is None or (retry_errors and previous.get('state') in ('error', 'partial')
+        old_algorithm = isinstance(previous, dict) and previous.get('algorithm') in PREVIOUS_ALGORITHMS
+        cache_only = old_algorithm or isinstance(previous, dict) and previous.get('cache_only') is True
+        migration = (old_algorithm
+                     and previous.get('state') in ('read', 'partial'))
+        if cache_only:
+            item['reprocess_cached'] = True
+        if migration:
+            # A completed old algorithm is a cached migration, never a new download.
+            item.update(state='pending_cached', reprocess_cached=True,
+                        previous_algorithm=previous['algorithm'])
+        if previous is None or migration or (retry_errors and previous.get('state') in ('error', 'partial')
                                 and previous.get('retryable') is True):
             output.append(item)
     return output
@@ -227,7 +241,7 @@ def _validate_worker(output, raw, folder):
     manifest = archive_evidence.inspect(raw)
     allowed = {'algorithm', 'archive_sha256', 'manifest', 'entries', 'archive_complete',
                'geometry_confirmed', 'georeferenced', 'ocr_performed', 'pdf_max_pages',
-               'member_max_bytes', 'counts', 'all_supported_members_read', 'state'}
+               'member_max_bytes', 'xml_max_bytes', 'counts', 'all_supported_members_read', 'state'}
     if (not isinstance(output, dict) or output.get('algorithm') != ALGORITHM
             or set(output) != allowed
             or output.get('archive_sha256') != manifest['archive_sha256']
@@ -235,6 +249,7 @@ def _validate_worker(output, raw, folder):
             or output.get('geometry_confirmed') is not False or output.get('georeferenced') is not False
             or output.get('ocr_performed') is not False or output.get('pdf_max_pages') != 40
             or output.get('member_max_bytes') != archive_evidence.MAX_MEMBER_BYTES
+            or output.get('xml_max_bytes') != egrn_xml.MAX_BYTES
             or not isinstance(output.get('entries'), list)
             or len(output['entries']) != len(manifest['entries'])):
         raise ValueError('Манифест или область чтения процесса не соответствуют исходному ZIP')
@@ -244,22 +259,37 @@ def _validate_worker(output, raw, folder):
                 or row.get('geometry_confirmed') is not False or row.get('georeferenced') is not False
                 or row.get('ocr_performed') is not False or not isinstance(row.get('reading_complete'), bool)):
             raise ValueError('Наблюдение относится к другой записи ZIP')
+        if original['format'] == 'xml':
+            allowed_row = set(original) | {'geometry_confirmed', 'georeferenced', 'reading_complete', 'ocr_performed'}
+            if row.get('sha256') is not None:
+                allowed_row |= {'sha256', 'actual_size', 'crc_verified', 'archive_sha256'}
+            if row.get('state') == 'read':
+                allowed_row.add('evidence')
+            elif row.get('state') == 'error':
+                allowed_row.add('error')
+            if (set(row) != allowed_row or row.get('reason') != original['reason']
+                    or row.get('state') == 'error'
+                       and row.get('error') != 'ЕГРН XML: чтение выбранных полей не удалось'):
+                raise ValueError('Наблюдение XML содержит неподдержанные поля или текст ошибки')
         if original['state'] != 'ready':
-            if row.get('state') != original['state'] or 'sha256' in row or 'evidence' in row:
+            if (row.get('state') != original['state'] or 'sha256' in row or 'evidence' in row
+                    or row.get('reading_complete') is not False):
                 raise ValueError('Неподдержанная запись ZIP ошибочно объявлена прочитанной')
         elif row.get('state') not in ('read', 'error'):
             raise ValueError('Неизвестный результат чтения записи ZIP')
         if row.get('sha256') is not None:
             identifier = archive_evidence.member_identifier(manifest, original)
             identifier['sha256'] = row['sha256']
-            _, checked = archive_evidence.read_member(raw, identifier)
-            if row.get('actual_size') != checked['actual_size'] or row.get('crc_verified') is not True:
+            member, checked = archive_evidence.read_member(raw, identifier)
+            if (row.get('actual_size') != checked['actual_size'] or row.get('crc_verified') is not True
+                    or row.get('archive_sha256') != checked['archive_sha256']):
                 raise ValueError('Размер или CRC прочитанной записи ZIP не подтверждены')
-            cache = Path(folder) / (checked['sha256'] + '.' + original['format'])
-            cached_member = _cached_bytes(cache, archive_evidence.MAX_MEMBER_BYTES)
-            if (len(cached_member) != checked['actual_size']
-                    or hashlib.sha256(cached_member).hexdigest() != checked['sha256']):
-                raise ValueError('Сохранённая запись ZIP отсутствует или изменена')
+            if original['format'] != 'xml':
+                cache = Path(folder) / (checked['sha256'] + '.' + original['format'])
+                cached_member = _cached_bytes(cache, archive_evidence.MAX_MEMBER_BYTES)
+                if (len(cached_member) != checked['actual_size']
+                        or hashlib.sha256(cached_member).hexdigest() != checked['sha256']):
+                    raise ValueError('Сохранённая запись ZIP отсутствует или изменена')
         if row.get('state') == 'read' and (not row.get('sha256') or not isinstance(row.get('evidence'), dict)):
             raise ValueError('Прочитанная запись ZIP не содержит связанного доказательства')
         if row.get('state') == 'read':
@@ -272,6 +302,17 @@ def _validate_worker(output, raw, folder):
                     or row['reading_complete'] != (details.get('text_layer_complete') is True
                         and not details.get('unread_pages') and not details.get('image_or_sparse_pages'))):
                 raise ValueError('Область доказательства записи ZIP не подтверждена')
+            if original['format'] == 'xml':
+                selected = xml_whitelist_bytes(egrn_xml.extract(member))
+                expected_evidence = {'algorithm': egrn_xml.ALGORITHM,
+                        'details': json.loads(selected), 'geometry_confirmed': False, 'georeferenced': False,
+                        'whitelist_cache_sha256': hashlib.sha256(selected).hexdigest(),
+                        'whitelist_cache_size': len(selected)}
+                cached_selected = _cached_bytes(Path(folder) / (expected_evidence['whitelist_cache_sha256']
+                                                + '.xml.whitelist.json'), MAX_OUTPUT)
+                if (xml_whitelist_bytes(evidence) != xml_whitelist_bytes(expected_evidence)
+                        or cached_selected != selected or row['reading_complete'] is not False):
+                    raise ValueError('Выбранные поля XML или их безопасный кэш не соответствуют исходной записи')
             if evidence.get('text_cache_sha256') is not None:
                 text_sha = evidence['text_cache_sha256']
                 text = Path(folder) / (row['sha256'] + '.txt')
@@ -358,9 +399,12 @@ def run(project, params, active=True):
             binding = item['source_binding']
             prior = records.get(binding['binding_id'], {})
             record = {'binding_id': binding['binding_id'], 'source_binding': binding,
+                      'algorithm': ALGORITHM,
                       'file_key': item['file_key'], 'checked_at': store.now(),
                       'state': 'error', 'retryable': True, 'geometry_confirmed': False,
                       'georeferenced': False, 'archive_complete': False, 'ocr_performed': False}
+            if reprocess or item.get('reprocess_cached') is True:
+                record['cache_only'] = True
             previous_evidence = prior.get('evidence_sha256') or prior.get('previous_evidence_sha256')
             if previous_evidence:
                 record['previous_evidence_sha256'] = previous_evidence
@@ -374,7 +418,12 @@ def run(project, params, active=True):
                 receipt = prior.get('source_receipt')
                 if receipt:
                     phase = 'cached_source'
+                    if (prior.get('binding_id') != binding['binding_id']
+                            or prior.get('source_binding') != binding):
+                        raise ValueError('Сохранённый ZIP относится к другой привязке карточки')
                     digest = _receipt_digest(receipt, binding)
+                    if prior.get('archive_sha256') not in (None, digest):
+                        raise ValueError('Квитанция относится к другому сохранённому ZIP')
                     path = folder / (digest + '.zip')
                     raw = _cached_bytes(path, archive_evidence.MAX_BYTES)
                     if hashlib.sha256(raw).hexdigest() != digest:
@@ -382,7 +431,7 @@ def run(project, params, active=True):
                     record['source_receipt'] = copy.deepcopy(receipt)
                     attempt['cached_files'] += 1
                 else:
-                    if reprocess:
+                    if reprocess or item.get('reprocess_cached') is True:
                         raise ValueError('В режиме чтения кэша скачивание ZIP запрещено')
                     attempt['network_requests'] += 1
                     raw, content_type, code = fetch(torgi_docs.FILE + item['file_id'],
@@ -448,6 +497,34 @@ def run(project, params, active=True):
         store.set_setting(setting_key(project, active, '_attempt'), attempt)
 
 
+def _accepted_record(item, record):
+    """Accept dated current metadata only; this does not reread source/cache files."""
+    if (not item.get('eligible') or not isinstance(record, dict) or record.get('algorithm') != ALGORITHM
+            or record.get('state') not in ('read', 'partial')
+            or record.get('binding_id') != item.get('binding_id')
+            or record.get('source_binding') != item.get('source_binding')
+            or record.get('xml_max_bytes') != egrn_xml.MAX_BYTES
+            or record.get('archive_complete') is not False or record.get('geometry_confirmed') is not False
+            or record.get('georeferenced') is not False or record.get('ocr_performed') is not False
+            or not _date(record.get('checked_at'))
+            or _hash({key: value for key, value in record.items() if key != 'evidence_sha256'})
+               != record.get('evidence_sha256')):
+        return False
+    try:
+        digest = _receipt_digest(record.get('source_receipt'), item['source_binding'])
+    except (ValueError, KeyError, TypeError):
+        return False
+    manifest = record.get('manifest') or {}
+    if not isinstance(manifest, dict):
+        return False
+    return (record.get('archive_sha256') == digest
+            and manifest.get('algorithm') == archive_evidence.ALGORITHM
+            and manifest.get('archive_sha256') == digest
+            and manifest.get('size') == item['declared_size']
+            and record.get('observation_id') == _hash({'binding_id': item['binding_id'],
+                'source_receipt': record['source_receipt'], 'algorithm': ALGORITHM}))
+
+
 def summary(project, active=True, lot_id=None):
     search = store.get_setting(torgi.setting_key(project, active))
     catalog = store.get_setting(torgi_docs.setting_key(project, active), {}) or {}
@@ -463,8 +540,20 @@ def summary(project, active=True, lot_id=None):
         if record:
             item['observation'] = record
             item['state'] = record['state']
+            if record.get('algorithm') in PREVIOUS_ALGORITHMS and record['state'] in ('read', 'partial'):
+                item.update(state='pending_cached', reprocess_cached=True,
+                            previous_algorithm=record['algorithm'])
         elif item['eligible']:
             item['state'] = 'pending'
+    xml_rows = []
+    for item in sources:
+        record = item.get('observation', {})
+        item['accepted_observation'] = _accepted_record(item, record)
+        if not item['accepted_observation']:
+            continue
+        xml_rows.extend(row for row in record.get('entries', []) if row.get('format') == 'xml'
+                        and row.get('state') == 'read'
+                        and row.get('evidence', {}).get('algorithm') == egrn_xml.ALGORITHM)
     return {'id': collection.get('id'), 'catalog_id': catalog.get('id'), 'current': current,
             'algorithm': ALGORITHM, 'warning': WARNING, 'archives': sources,
             'archive_count': len(sources), 'pending': len(queue(search, catalog, records, active=active,lot_id=lot_id)) if current else 0,
@@ -472,6 +561,9 @@ def summary(project, active=True, lot_id=None):
             'retry_remaining': len(queue(search, catalog, records, True,active,lot_id)) if current else 0,
             'blocked_count': sum(not item['eligible'] for item in sources),
             'retryable_count': sum(item.get('observation', {}).get('retryable') is True for item in sources),
+            'pending_cached': sum(item.get('state') == 'pending_cached' for item in sources),
+            'xml_members_read': len(xml_rows),
+            'xml_contours': sum(len(row.get('evidence', {}).get('details', {}).get('contours', [])) for row in xml_rows),
             'retained_count': sum(key not in current_ids for key in records),
             'attempt': store.get_setting(setting_key(project, active, '_attempt')),
             'archive_complete': False, 'geometry_confirmed': False, 'georeferenced': False,
@@ -481,6 +573,7 @@ def summary(project, active=True, lot_id=None):
 def html_report(project, active=True, lot_id=None):
     result = summary(project, active,lot_id)
     rows = []
+    point_budget = MAX_XML_REPORT_POINTS
     for archive in result['archives']:
         record = archive.get('observation', {})
         counts = record.get('counts', {})
@@ -490,12 +583,77 @@ def html_report(project, active=True, lot_id=None):
                     + escape(str(counts.get('errors', 0))) + '</td><td>'
                     + escape(str(counts.get('incomplete', 0))) + '</td></tr>')
         for entry in record.get('entries', []):
-            rows.append('<tr><td colspan="2">' + escape(entry['name']) + '</td><td colspan="4">'
-                        + escape(entry['state'] + ': ' + (entry.get('error') or entry.get('reason') or '')) + '</td></tr>')
+            xml = entry.get('format') == 'xml'
+            name = ('XML · ' + str(entry.get('id', ''))[:16]) if xml else entry['name']
+            description = (('Чтение выбранных полей не удалось' if entry['state'] == 'error'
+                            else entry.get('reason') or '') if xml
+                           else entry.get('error') or entry.get('reason') or '')
+            rows.append('<tr><td colspan="2">' + escape(name) + '</td><td colspan="4">'
+                        + escape(entry['state'] + ': ' + description) + '</td></tr>')
+            if xml and archive.get('accepted_observation') is True and entry.get('state') == 'read':
+                rendered, shown = _xml_html(entry, record, point_budget)
+                rows.append('<tr><td colspan="6">' + rendered + '</td></tr>')
+                point_budget -= shown
     return ('<!doctype html><meta charset="utf-8"><title>ZIP: наблюдения вложений</title>'
             '<h1>ZIP: наблюдения вложений</h1><p>' + escape(WARNING) + '</p>'
             '<table><thead><tr><th>Ключ</th><th>Состояние</th><th>Прочитано</th><th>Не поддержано</th>'
             '<th>Ошибки</th><th>Частичное чтение</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>')
+
+
+def _xml_html(entry, record, point_budget):
+    """Render selected XML fields only, with one shared 100-point report budget."""
+    details = (entry.get('evidence') or {}).get('details', {})
+    if not isinstance(details, dict) or details.get('algorithm') != egrn_xml.ALGORITHM:
+        return '<p>Выбранные поля XML не подтверждены.</p>', 0
+    cad = details.get('cadastral_number')
+    cad = cad if isinstance(cad, str) and re.fullmatch(r'[0-9]{1,2}:[0-9]{1,2}:[0-9]{1,8}:[0-9]{1,12}', cad) else 'не подтверждён'
+    def number(key):
+        value = details.get(key)
+        return value if type(value) is int and 0 <= value <= egrn_xml.MAX_POINTS else 0
+    receipt = record.get('source_receipt') or {}
+    digest = entry.get('sha256')
+    digest = digest if isinstance(digest, str) and HEX.fullmatch(digest) else 'не подтверждён'
+    received = receipt.get('received_at') if _date(receipt.get('received_at')) else 'не подтверждена'
+    checked = record.get('checked_at') if _date(record.get('checked_at')) else 'не подтверждена'
+    archive_sha = record.get('archive_sha256')
+    archive_sha = archive_sha if isinstance(archive_sha, str) and HEX.fullmatch(archive_sha) else 'не подтверждён'
+    parts = ['<details><summary>XML ЕГРН: выбранные поля · ' + escape(cad) + '</summary>',
+             '<p>Частичное чтение XML по белому списку. Исходный XY и идентификатор системы координат '
+             'не подтверждены и не преобразованы на карту. Права и свободность земли не подтверждены.</p>',
+             '<p>Контуры: принято ' + str(number('accepted_contour_count')) + ', пропущено '
+             + str(number('omitted_contour_count')) + '. Точки: принято ' + str(number('accepted_point_count'))
+             + ', получено ' + str(number('received_point_count')) + ', пропущено '
+             + str(max(0, number('received_point_count') - number('accepted_point_count'))) + '.</p>',
+             '<p>SHA-256 записи: <code>' + escape(digest) + '</code>. ZIP получен: '
+             + escape(received) + '. Поля прочитаны: ' + escape(checked) + '.</p>',
+             '<p>SHA-256 исходного ZIP: <code>' + escape(archive_sha) + '</code>.</p>']
+    shown = 0
+    contours = details.get('contours')
+    for contour in contours[:egrn_xml.MAX_CONTOURS] if isinstance(contours, list) else []:
+        if not isinstance(contour, dict):
+            continue
+        crs = contour.get('source_crs_raw')
+        crs = crs[:128] if isinstance(crs, str) else 'не указан'
+        parts.append('<p>Исходный SKid: <code>' + escape(crs) + '</code> (не подтверждён).</p>')
+        points = contour.get('raw_points_xy')
+        if not isinstance(points, list):
+            continue
+        rendered = []
+        for point in points[:max(0, point_budget - shown)]:
+            if (not isinstance(point, list) or len(point) != 2
+                    or not all(isinstance(value, str) and len(value) <= 64
+                        and re.fullmatch(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)', value.strip()) for value in point)):
+                continue
+            rendered.append('<tr data-xml-point><td>' + escape(point[0]) + '</td><td>' + escape(point[1]) + '</td></tr>')
+        shown += len(rendered)
+        if rendered:
+            parts.append('<table><thead><tr><th>Исходный X</th><th>Исходный Y</th></tr></thead><tbody>'
+                         + ''.join(rendered) + '</tbody></table>')
+        omitted = max(0, len(points) - len(rendered))
+        if omitted:
+            parts.append('<p>Точек не показано из-за общего лимита 100: ' + str(omitted) + '.</p>')
+    parts.append('</details>')
+    return ''.join(parts), shown
 
 
 def cached_observation(project, evidence_sha256, active=True):

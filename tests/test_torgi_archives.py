@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import zipfile
 import pytest
-from land import archive_evidence, store, torgi, torgi_docs
+from land import archive_evidence, egrn_xml, store, torgi, torgi_docs
 from land import torgi_archives as archives
 from land import torgi_archive_worker as worker
 
@@ -15,6 +15,22 @@ PROJECT = 'archive-test'
 LOT = '22000144320000000046_1'
 DATE = '2026-10-11T12:00:00+00:00'
 RTF = b'{\\rtf1 public evidence 90:12:040101:23}'
+
+
+def xml_bytes():
+    points = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]
+    ordinates = ''.join('<ordinate><x>' + str(x) + '</x><y>' + str(y)
+                       + '</y><ord_nmb>' + str(index + 1) + '</ord_nmb></ordinate>'
+                       for index, (x, y) in enumerate(points))
+    return ('<?xml version="1.0" encoding="UTF-8"?><extract_about_property_land>'
+            '<details_request><address>PRIVATE_ADDRESS_NOT_COPIED</address></details_request>'
+            '<right_records><owner>PRIVATE_OWNER_NOT_COPIED</owner></right_records>'
+            '<recipient_statement><recipient>PRIVATE_RECIPIENT_NOT_COPIED</recipient></recipient_statement>'
+            '<land_record><object><common_data><cad_number>99:99:1234567:8</cad_number>'
+            '</common_data></object><contours_location><contours><contour><entity_spatial>'
+            '<sk_id>UNKNOWN LOCAL &lt;CRS&gt;</sk_id><spatials_elements><spatial_element><ordinates>'
+            + ordinates + '</ordinates></spatial_element></spatials_elements></entity_spatial>'
+            '</contour></contours></contours_location></land_record></extract_about_property_land>').encode()
 
 
 def zip_bytes(entries=None):
@@ -493,3 +509,307 @@ def test_all_empty_zip_is_partial_observation(tmp_path):
     result = worker.process(raw, hashlib.sha256(raw).hexdigest(), tmp_path)
     assert result['state'] == 'partial' and result['archive_complete'] is False
     assert result['counts']['entries'] == 0
+
+
+def test_xml_worker_retains_only_safe_selected_json_and_never_claims_complete(tmp_path):
+    member = xml_bytes()
+    raw = zip_bytes([('folder/private-name.xml', member)])
+    result = worker.process(raw, hashlib.sha256(raw).hexdigest(), tmp_path)
+    row = result['entries'][0]
+    assert result['algorithm'] == 'torgi-archive-members-v2'
+    assert result['xml_max_bytes'] == 2 * 1024 * 1024
+    assert row['state'] == 'read' and row['reading_complete'] is False
+    assert result['counts']['read'] == result['counts']['incomplete'] == 1
+    assert result['all_supported_members_read'] is True
+    assert result['state'] == 'partial' and result['archive_complete'] is False
+    details = row['evidence']['details']
+    assert details == egrn_xml.extract(member)
+    assert details['accepted_contour_count'] == 1 and details['accepted_point_count'] == 5
+    assert details['all_contours_accepted'] is True and details['complete_source'] is False
+    assert details['georeferenced'] is details['rights_confirmed'] is details['free_land_confirmed'] is False
+    digest = hashlib.sha256(member).hexdigest()
+    selected = worker.xml_whitelist_bytes(details)
+    selected_sha = hashlib.sha256(selected).hexdigest()
+    assert list(tmp_path.iterdir()) == [tmp_path / (selected_sha + '.xml.whitelist.json')]
+    assert (tmp_path / (selected_sha + '.xml.whitelist.json')).read_bytes() == selected
+    assert row['evidence']['whitelist_cache_sha256'] == selected_sha
+    assert row['evidence']['whitelist_cache_size'] == len(selected)
+    assert b'PRIVATE_' not in selected and 'PRIVATE_' not in json.dumps(result)
+    assert archives._validate_worker(result, raw, tmp_path) == result
+
+
+def test_xml_run_preserves_primary_provenance_and_reports_only_selected_evidence(isolated, monkeypatch):
+    raw = zip_bytes([('PRIVATE_FILENAME_NOT_SHOWN.xml', xml_bytes())])
+    _, catalog = seed(raw)
+    observe(monkeypatch, raw)
+    observed = record()
+    assert store.get_setting(torgi_docs.setting_key(PROJECT, True)) == catalog
+    assert observed['entries'][0]['association_reference']['member_sha256'] == hashlib.sha256(xml_bytes()).hexdigest()
+    assert observed['source_receipt']['sha256'] == hashlib.sha256(raw).hexdigest()
+    report = archives.summary(PROJECT)
+    assert report['xml_members_read'] == report['xml_contours'] == 1
+    assert report['pending_cached'] == 0
+    html = archives.html_report(PROJECT)
+    assert '99:99:1234567:8' in html and 'UNKNOWN LOCAL &lt;CRS&gt;' in html
+    assert '<CRS>' not in html and 'PRIVATE_' not in html
+    assert 'не подтверждены' in html and 'Частичное чтение XML' in html
+    assert html.count('data-xml-point') == 5
+
+
+@pytest.mark.parametrize('member', [b'<extract_about_property_land><owner>PRIVATE_NOT_COPIED',
+                                  b'<unknown><owner>PRIVATE_NOT_COPIED</owner></unknown>',
+                                  b'<!DOCTYPE x [<!ENTITY x "PRIVATE_NOT_COPIED">]><x>&x;</x>'])
+def test_malformed_or_unsupported_xml_has_fixed_error_and_no_member_cache(tmp_path, member):
+    raw = zip_bytes([('selected.xml', member)])
+    result = worker.process(raw, hashlib.sha256(raw).hexdigest(), tmp_path)
+    assert result['counts']['errors'] == 1 and result['state'] == 'partial'
+    assert result['entries'][0]['error'] == 'ЕГРН XML: чтение выбранных полей не удалось'
+    assert not list(tmp_path.iterdir())
+    assert 'PRIVATE_NOT_COPIED' not in json.dumps(result)
+    assert archives._validate_worker(result, raw, tmp_path) == result
+
+
+def test_oversized_xml_is_not_opened_and_other_supported_members_still_read(tmp_path, monkeypatch):
+    raw = zip_bytes([('large.xml', b'<' + b'X' * archive_evidence.MAX_XML_BYTES), ('ok.rtf', RTF)])
+    monkeypatch.setattr(worker.egrn_xml, 'extract', lambda *a: pytest.fail('Oversized XML must not be parsed'))
+    result = worker.process(raw, hashlib.sha256(raw).hexdigest(), tmp_path)
+    assert result['counts']['unsupported'] == result['counts']['read'] == 1
+    assert result['entries'][0]['state'] == 'unsupported' and 'sha256' not in result['entries'][0]
+    assert not list(tmp_path.glob('*.xml*'))
+
+
+@pytest.mark.parametrize('change', ['private_details', 'false_rights', 'false_complete', 'private_cache',
+                                    'cache_digest', 'cache_size', 'extra_text_cache', 'raw_geometry',
+                                    'extra_private_row', 'private_reason', 'foreign_archive_sha'])
+def test_xml_worker_cannot_persist_private_fields_false_claims_or_modified_safe_cache(isolated, monkeypatch, change):
+    raw = zip_bytes([('selected.xml', xml_bytes())])
+    seed(raw)
+    def injected(path, digest, folder):
+        result = worker.process(Path(path).read_bytes(), digest, folder)
+        row = result['entries'][0]
+        evidence = row['evidence']
+        cache = Path(folder) / (evidence['whitelist_cache_sha256'] + '.xml.whitelist.json')
+        if change == 'private_details': evidence['details']['owner'] = 'PRIVATE_INJECTED'
+        elif change == 'false_rights': evidence['details']['rights_confirmed'] = True
+        elif change == 'false_complete': row['reading_complete'] = True
+        elif change == 'private_cache': cache.write_bytes(b'{"owner":"PRIVATE_INJECTED"}')
+        elif change == 'cache_digest': evidence['whitelist_cache_sha256'] = '0' * 64
+        elif change == 'cache_size': evidence['whitelist_cache_size'] += 1
+        elif change == 'extra_text_cache': evidence['text_cache_sha256'] = '0' * 64
+        elif change == 'extra_private_row': row['owner'] = 'PRIVATE_INJECTED'
+        elif change == 'private_reason': row['reason'] = 'PRIVATE_INJECTED'
+        elif change == 'foreign_archive_sha': row['archive_sha256'] = '0' * 64
+        else: evidence['details']['geometry_confirmed'] = True
+        return result
+    monkeypatch.setattr(archives, 'extract_archive', injected)
+    observe(monkeypatch, raw)
+    assert record()['state'] == 'error' and 'entries' not in record()
+    assert 'PRIVATE_' not in json.dumps(record())
+
+
+def test_xml_error_worker_cannot_persist_private_exception_text(isolated, monkeypatch):
+    raw = zip_bytes([('selected.xml', b'<broken>PRIVATE_BODY')])
+    seed(raw)
+    def injected(path, digest, folder):
+        result = worker.process(Path(path).read_bytes(), digest, folder)
+        result['entries'][0]['error'] = 'PRIVATE_EXCEPTION'
+        return result
+    monkeypatch.setattr(archives, 'extract_archive', injected)
+    observe(monkeypatch, raw)
+    assert record()['state'] == 'error' and 'entries' not in record()
+    assert 'PRIVATE_' not in json.dumps(record())
+
+
+def test_unsupported_xml_worker_cannot_claim_reading_complete(isolated, monkeypatch):
+    raw = zip_bytes([('large.xml', b'<' + b'X' * archive_evidence.MAX_XML_BYTES)])
+    seed(raw)
+    def injected(path, digest, folder):
+        result = worker.process(Path(path).read_bytes(), digest, folder)
+        result['entries'][0]['reading_complete'] = True
+        return result
+    monkeypatch.setattr(archives, 'extract_archive', injected)
+    observe(monkeypatch, raw)
+    assert record()['state'] == 'error' and 'entries' not in record()
+
+
+def old_observation(isolated):
+    """Model a genuine v1 result without reinterpreting its immutable bytes."""
+    collection = store.get_setting(archives.setting_key(PROJECT))
+    observed = copy.deepcopy(next(iter(collection['records'].values())))
+    observed['algorithm'] = 'torgi-archive-members-v1'
+    observed.pop('xml_max_bytes')
+    observed['manifest']['algorithm'] = 'archive-evidence-v1'
+    observed['observation_id'] = archives._hash({'binding_id': observed['binding_id'],
+                    'source_receipt': observed['source_receipt'], 'algorithm': observed['algorithm']})
+    for entry in observed['entries']:
+        entry['association_reference']['observation_id'] = observed['observation_id']
+        if entry['format'] == 'xml':
+            original = next(row for row in observed['manifest']['entries'] if row['id'] == entry['id'])
+            original.update(state='unsupported', reason='Формат не поддержан; содержимое не читается и не исполняется')
+            entry = {**original, 'geometry_confirmed': False, 'georeferenced': False,
+                     'reading_complete': False, 'ocr_performed': False,
+                     'association_reference': {**entry['association_reference'], 'member_sha256': None}}
+            observed['entries'] = [entry]
+            observed['counts'].update(supported=0, read=0, unsupported=1, incomplete=0)
+            observed['all_supported_members_read'] = False
+    reference = archives._snapshot(isolated / 'torgi_archives', observed)
+    collection['records'][observed['binding_id']] = observed
+    collection.setdefault('observations', {})[observed['evidence_sha256']] = reference
+    collection['algorithm'] = 'torgi-archive-members-v1'
+    store.set_setting(archives.setting_key(PROJECT), collection)
+    return observed
+
+
+def test_v1_xml_is_pending_cached_then_migrates_with_same_receipt_and_immutable_history(isolated, monkeypatch):
+    raw = zip_bytes([('selected.xml', xml_bytes())])
+    _, catalog = seed(raw)
+    observe(monkeypatch, raw)
+    before = old_observation(isolated)
+    frozen = archives.cached_observation(PROJECT, before['evidence_sha256'])
+    report = archives.summary(PROJECT)
+    assert report['pending_cached'] == report['pending'] == report['remaining'] == 1
+    assert report['xml_members_read'] == report['xml_contours'] == 0
+    assert report['archives'][0]['state'] == 'pending_cached'
+    monkeypatch.setattr(archives, 'fetch', lambda *a, **k: pytest.fail('Migration must never download'))
+    result = archives.run(PROJECT, {'id': 'primary-v1'})
+    assert result['processed'] == result['cached_files'] == 1 and result['network_requests'] == 0
+    assert result['remaining'] == 0 and result['state'] == 'partial'
+    after = record()
+    assert after['algorithm'] == worker.ALGORITHM
+    assert after['source_receipt'] == before['source_receipt']
+    assert after['binding_id'] == before['binding_id']
+    assert after['observation_id'] != before['observation_id']
+    assert after['previous_evidence_sha256'] == before['evidence_sha256']
+    assert archives.cached_observation(PROJECT, before['evidence_sha256']) == frozen
+    assert store.get_setting(torgi_docs.setting_key(PROJECT, True)) == catalog
+    assert archives.summary(PROJECT)['xml_members_read'] == 1
+    assert archives.summary(PROJECT)['pending_cached'] == 0
+    assert archives.run(PROJECT, {'id': 'primary-v1'})['processed'] == 0
+
+
+@pytest.mark.parametrize('change', ['missing_cache', 'corrupt_cache', 'missing_receipt', 'foreign_binding', 'foreign_digest'])
+def test_cached_v1_migration_fails_closed_without_http_and_keeps_history(isolated, monkeypatch, change):
+    raw = zip_bytes()
+    seed(raw)
+    observe(monkeypatch, raw)
+    before = old_observation(isolated)
+    collection = store.get_setting(archives.setting_key(PROJECT))
+    old = collection['records'][before['binding_id']]
+    path = isolated / 'torgi_archives' / (old['archive_sha256'] + '.zip')
+    if change == 'missing_cache': path.unlink()
+    elif change == 'corrupt_cache': path.write_bytes(b'changed source')
+    elif change == 'missing_receipt': old.pop('source_receipt')
+    elif change == 'foreign_binding': old['source_binding']['search_source_id'] = 'foreign'
+    else: old['archive_sha256'] = '0' * 64
+    store.set_setting(archives.setting_key(PROJECT), collection)
+    monkeypatch.setattr(archives, 'fetch', lambda *a, **k: pytest.fail('Cached migration cannot fall back to HTTP'))
+    result = archives.run(PROJECT, {'id': 'primary-v1'})
+    assert result['network_requests'] == 0 and result['state'] == 'partial'
+    assert record()['state'] in ('error', 'rejected')
+    assert record()['previous_evidence_sha256'] == before['evidence_sha256']
+    assert archives.cached_observation(PROJECT, before['evidence_sha256'])['algorithm'] == 'torgi-archive-members-v1'
+
+
+@pytest.mark.parametrize('has_receipt', [True, False])
+def test_v1_error_needs_explicit_retry_and_never_falls_back_to_download(isolated, monkeypatch, has_receipt):
+    raw = zip_bytes()
+    seed(raw)
+    observe(monkeypatch, raw)
+    before = old_observation(isolated)
+    collection = store.get_setting(archives.setting_key(PROJECT))
+    prior = collection['records'][before['binding_id']]
+    prior.update(state='error', retryable=True)
+    if not has_receipt:
+        prior.pop('source_receipt')
+    store.set_setting(archives.setting_key(PROJECT), collection)
+    monkeypatch.setattr(archives, 'fetch', lambda *a, **k: pytest.fail('Recognized v1 retry cannot download'))
+    assert archives.run(PROJECT, {'id': 'primary-v1'})['processed'] == 0
+    result = archives.run(PROJECT, {'id': 'primary-v1', 'retry_errors': True})
+    assert result['processed'] == 1 and result['network_requests'] == 0
+    assert record()['cache_only'] is True
+    if has_receipt:
+        assert result['cached_files'] == 1
+        assert record()['source_receipt'] == before['source_receipt']
+    else:
+        assert record()['state'] == 'error'
+        # A failed migration keeps cache-only semantics on subsequent explicit retries.
+        assert archives.run(PROJECT, {'id': 'primary-v1', 'retry_errors': True})['network_requests'] == 0
+
+
+@pytest.mark.parametrize('change', ['binding', 'record_hash', 'manifest_algorithm', 'receipt', 'observation_id'])
+def test_unaccepted_xml_record_does_not_render_selected_data_or_count_as_read(isolated, monkeypatch, change):
+    raw = zip_bytes([('selected.xml', xml_bytes())])
+    seed(raw)
+    observe(monkeypatch, raw)
+    collection = store.get_setting(archives.setting_key(PROJECT))
+    observed = next(iter(collection['records'].values()))
+    if change == 'binding': observed['source_binding']['search_source_id'] = 'foreign'
+    elif change == 'record_hash': observed['evidence_sha256'] = '0' * 64
+    elif change == 'manifest_algorithm': observed['manifest']['algorithm'] = 'archive-evidence-v1'
+    elif change == 'receipt': observed['source_receipt']['received_at'] = 'invalid'
+    else: observed['observation_id'] = '0' * 64
+    if change != 'record_hash':
+        observed['evidence_sha256'] = archives._hash({key: value for key, value in observed.items() if key != 'evidence_sha256'})
+    store.set_setting(archives.setting_key(PROJECT), collection)
+    assert archives.summary(PROJECT)['xml_members_read'] == 0
+    html = archives.html_report(PROJECT)
+    assert '99:99:1234567:8' not in html and 'UNKNOWN LOCAL' not in html
+    assert 'data-xml-point' not in html
+
+
+def test_xml_report_uses_shared_hundred_point_budget_without_dumping_raw_fields():
+    details = egrn_xml.extract(xml_bytes())
+    points = [[str(index), str(index + 1)] for index in range(130)]
+    details['contours'] = [{'source_crs_raw': 'LOCAL <UNKNOWN>', 'raw_points_xy': points}] * 2
+    entry = {'evidence': {'details': details}, 'sha256': 'a' * 64}
+    observed = {'source_receipt': {'received_at': DATE}, 'checked_at': DATE}
+    html, shown = archives._xml_html(entry, observed, 100)
+    assert shown == html.count('data-xml-point') == 100
+    assert 'LOCAL &lt;UNKNOWN&gt;' in html and '<UNKNOWN>' not in html
+    assert 'Точек не показано' in html
+    assert '30' in html and '130' in html
+
+
+def test_real_isolated_xml_worker_smoke(tmp_path):
+    raw = zip_bytes([('selected.xml', xml_bytes())])
+    digest = hashlib.sha256(raw).hexdigest()
+    path = tmp_path / (digest + '.zip')
+    path.write_bytes(raw)
+    output = archives.extract_archive(path, digest, tmp_path / 'members')
+    assert output['counts']['read'] == output['counts']['incomplete'] == 1
+    assert archives._validate_worker(output, raw, tmp_path / 'members') == output
+
+
+def test_same_xml_source_new_selected_interpretation_preserves_prior_safe_cache(tmp_path, monkeypatch):
+    raw = zip_bytes([('selected.xml', xml_bytes())])
+    digest = hashlib.sha256(raw).hexdigest()
+    original = egrn_xml.extract
+    omitted = original(xml_bytes())
+    omitted.update(contours=[], accepted_contour_count=0, accepted_point_count=0,
+                   omitted_contour_count=1, all_contours_accepted=False,
+                   errors=[{'contour_index': 0, 'code': 'invalid_point_order'}])
+    monkeypatch.setattr(worker.egrn_xml, 'extract', lambda member: copy.deepcopy(omitted))
+    previous = worker.process(raw, digest, tmp_path)
+    old_evidence = previous['entries'][0]['evidence']
+    old_path = tmp_path / (old_evidence['whitelist_cache_sha256'] + '.xml.whitelist.json')
+    old_bytes = old_path.read_bytes()
+    monkeypatch.setattr(worker.egrn_xml, 'extract', original)
+    current = worker.process(raw, digest, tmp_path)
+    new_evidence = current['entries'][0]['evidence']
+    new_path = tmp_path / (new_evidence['whitelist_cache_sha256'] + '.xml.whitelist.json')
+    assert old_path != new_path and old_path.read_bytes() == old_bytes
+    assert new_path.read_bytes() == worker.xml_whitelist_bytes(original(xml_bytes()))
+    assert previous['entries'][0]['sha256'] == current['entries'][0]['sha256']
+    assert len(list(tmp_path.glob('*.xml.whitelist.json'))) == 2
+
+
+def test_xml_safe_cache_content_address_is_never_overwritten_when_corrupt(tmp_path):
+    raw = zip_bytes([('selected.xml', xml_bytes())])
+    digest = hashlib.sha256(raw).hexdigest()
+    previous = worker.process(raw, digest, tmp_path)
+    selected_sha = previous['entries'][0]['evidence']['whitelist_cache_sha256']
+    path = tmp_path / (selected_sha + '.xml.whitelist.json')
+    path.write_bytes(b'changed safe cache')
+    result = worker.process(raw, digest, tmp_path)
+    assert result['entries'][0]['state'] == 'error' and result['counts']['errors'] == 1
+    assert path.read_bytes() == b'changed safe cache'

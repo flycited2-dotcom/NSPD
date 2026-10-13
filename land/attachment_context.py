@@ -1,11 +1,12 @@
 """Pure, dated attachment metadata for frozen dossiers; never legal exclusion data."""
 from datetime import datetime
+import json
 import re
 
-from . import archive_evidence, image_frames, torgi, torgi_docs
+from . import archive_evidence, egrn_xml, image_frames, torgi, torgi_docs
 from . import torgi_archives as archives, torgi_image_frames as frames
 
-ALGORITHM = 'attachment-context-v1'
+ALGORITHM = 'attachment-context-v2'
 MAX_FILES = 16
 MAX_MEMBERS = archive_evidence.MAX_ENTRIES
 MAX_HINTS = 4
@@ -14,6 +15,7 @@ HEX = re.compile(r'[0-9a-f]{64}')
 FILE_ID = re.compile(r'[0-9a-f]{24}')
 LOT_ID = re.compile(r'\d{10,30}_\d{1,6}')
 CAD = re.compile(r'\d{1,2}:\d{1,2}:\d{1,10}:\d{1,10}')
+XML_CAD = re.compile(r'[0-9]{1,2}:[0-9]{1,2}:[0-9]{1,8}:[0-9]{1,12}')
 WARNING = ('Снимок ранее записанных сведений вложений. Текущие файлы, CRC и кэш '
            'здесь не перечитываются. Номера являются подсказками; права, геопривязка '
            'и принадлежность объекта предмету лота не подтверждены.')
@@ -63,6 +65,54 @@ def _receipt(record, binding):
             'http_status': 200, 'receipt_sha256': archives._hash(receipt)}
 
 
+def _xml_valid(row, evidence, details):
+    """Check recorded XML scope without copying its raw coordinates or strings."""
+    keys = {'algorithm', 'source_sha256', 'source_bytes', 'root_type', 'node_count',
+            'omitted_node_count', 'cadastral_number', 'contours', 'received_contour_count',
+            'accepted_contour_count', 'omitted_contour_count', 'received_point_count',
+            'accepted_point_count', 'errors', 'all_contours_accepted', 'complete_source',
+            'coordinate_system_confirmed', 'georeferenced', 'geometry_confirmed',
+            'rights_confirmed', 'free_land_confirmed', 'legal_claims_confirmed'}
+    if (set(evidence) != {'algorithm', 'details', 'geometry_confirmed', 'georeferenced',
+                         'whitelist_cache_sha256', 'whitelist_cache_size'}
+            or set(details) != keys or details.get('algorithm') != egrn_xml.ALGORITHM
+            or details.get('source_sha256') != row['sha256']
+            or type(details.get('source_bytes')) is not int
+            or not 1 <= details['source_bytes'] <= egrn_xml.MAX_BYTES
+            or details['source_bytes'] != row.get('actual_size')
+            or details.get('root_type') != egrn_xml.ROOT
+            or not isinstance(details.get('cadastral_number'), str)
+            or not XML_CAD.fullmatch(details['cadastral_number'])
+            or row['reading_complete'] is not False
+            or any(details.get(key) is not False for key in ('complete_source',
+                'coordinate_system_confirmed', 'georeferenced', 'geometry_confirmed',
+                'rights_confirmed', 'free_land_confirmed', 'legal_claims_confirmed'))):
+        return False
+    limits = {'node_count': egrn_xml.MAX_NODES, 'omitted_node_count': egrn_xml.MAX_NODES,
+              'received_contour_count': egrn_xml.MAX_CONTOURS,
+              'accepted_contour_count': egrn_xml.MAX_CONTOURS,
+              'omitted_contour_count': egrn_xml.MAX_CONTOURS,
+              'received_point_count': egrn_xml.MAX_POINTS,
+              'accepted_point_count': egrn_xml.MAX_POINTS}
+    if any(_number(details.get(key), limit) is None for key, limit in limits.items()):
+        return False
+    contours, errors = details.get('contours'), details.get('errors')
+    if (not isinstance(contours, list) or not isinstance(errors, list)
+            or not details['node_count'] or details['omitted_node_count'] > details['node_count']
+            or not details['received_contour_count']
+            or details['accepted_contour_count'] + details['omitted_contour_count'] != details['received_contour_count']
+            or len(contours) != details['accepted_contour_count'] or len(errors) != details['omitted_contour_count']
+            or details['accepted_point_count'] > details['received_point_count']
+            or details.get('all_contours_accepted') is not (not errors)):
+        return False
+    # The parent parser verifies the full whitelist against source bytes. A
+    # frozen dossier checks its canonical receipt but exposes only counts.
+    encoded = json.dumps(details, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return (evidence.get('whitelist_cache_sha256') == archives._hash(details)
+            and type(evidence.get('whitelist_cache_size')) is int
+            and evidence['whitelist_cache_size'] == len(encoded) <= archives.MAX_OUTPUT)
+
+
 def _archive_valid(record, binding, receipt):
     """Validate recorded identities/scopes without opening any source or cache."""
     if (not receipt or record.get('algorithm') != archives.ALGORITHM
@@ -72,6 +122,7 @@ def _archive_valid(record, binding, receipt):
             or record.get('geometry_confirmed') is not False or record.get('georeferenced') is not False
             or record.get('pdf_max_pages') != 40
             or record.get('member_max_bytes') != archive_evidence.MAX_MEMBER_BYTES
+            or type(record.get('xml_max_bytes')) is not int or record['xml_max_bytes'] != egrn_xml.MAX_BYTES
             or not _date(record.get('checked_at')) or not _hex(record.get('evidence_sha256'))
             or archives._hash({key: value for key, value in record.items() if key != 'evidence_sha256'})
                != record['evidence_sha256']):
@@ -118,9 +169,13 @@ def _archive_valid(record, binding, receipt):
             details = _dict(evidence.get('details'))
             if (not _hex(row.get('sha256')) or evidence.get('algorithm') != archives.member_algorithm(before.get('format'))
                     or evidence.get('geometry_confirmed') is not False or evidence.get('georeferenced') is not False
-                    or details.get('geometry_confirmed') is not False or details.get('georeferenced') is not False
-                    or row['reading_complete'] != (details.get('text_layer_complete') is True
-                        and not details.get('unread_pages') and not details.get('image_or_sparse_pages'))):
+                    or details.get('geometry_confirmed') is not False or details.get('georeferenced') is not False):
+                return False
+            if before.get('format') == 'xml':
+                if not _xml_valid(row, evidence, details):
+                    return False
+            elif row['reading_complete'] != (details.get('text_layer_complete') is True
+                    and not details.get('unread_pages') and not details.get('image_or_sparse_pages')):
                 return False
         elif before.get('state') != 'ready' and ('sha256' in row or 'evidence' in row):
             return False
@@ -147,9 +202,14 @@ def _member(row):
         number = item.get('cadastral_number') if isinstance(item, dict) else None
         if isinstance(number, str) and CAD.fullmatch(number):
             candidates.add(torgi.canonical(number))
+    xml = row.get('format') == 'xml' and evidence.get('algorithm') == egrn_xml.ALGORITHM
+    if xml:
+        number = details.get('cadastral_number')
+        if isinstance(number, str) and XML_CAD.fullmatch(number):
+            candidates.add(torgi.canonical(number))
     hints = sorted(candidates)
     fmt = row.get('format')
-    return {'entry_id': row['id'], 'format': fmt if isinstance(fmt, str) and re.fullmatch('[a-z0-9]{1,12}', fmt) else None,
+    result = {'entry_id': row['id'], 'format': fmt if isinstance(fmt, str) and re.fullmatch('[a-z0-9]{1,12}', fmt) else None,
             'state': row['state'], 'declared_size': _number(row.get('size'), archive_evidence.MAX_MEMBER_BYTES),
             'sha256': _hex(row.get('sha256')), 'crc32': row.get('crc32') if isinstance(row.get('crc32'), str)
                 and re.fullmatch('[0-9a-f]{8}', row['crc32']) else None,
@@ -163,6 +223,17 @@ def _member(row):
             'reading_complete_observed': row['state'] == 'read' and row['reading_complete'],
             'number_hints': [{'cadastral_number': number, 'verification_required': True} for number in hints[:MAX_HINTS]],
             'omitted_number_hints': max(0, len(hints) - MAX_HINTS), 'ocr_performed': False, **FLAGS}
+    if xml:
+        result['xml_observation'] = {'algorithm': egrn_xml.ALGORITHM,
+            'whitelist_cache_sha256': _hex(evidence.get('whitelist_cache_sha256')),
+            'whitelist_cache_size': _number(evidence.get('whitelist_cache_size'), archives.MAX_OUTPUT),
+            **{key: details[key] for key in ('received_contour_count', 'accepted_contour_count',
+                'omitted_contour_count', 'received_point_count', 'accepted_point_count',
+                'omitted_node_count', 'all_contours_accepted')},
+            'coordinate_order': 'source_x_y', 'number_hint_basis': 'land_record_object',
+            'coordinate_system_confirmed': False, 'complete_source': False,
+            'free_land_confirmed': False, 'legal_claims_confirmed': False, **FLAGS}
+    return result
 
 
 def _archive_file(file, search, catalog, collection, active):

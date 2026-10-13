@@ -66,6 +66,7 @@ def test_metadata_inspection_does_not_read_members_or_invent_content_hash(compre
     ('doc', b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1body'), ('rtf', b'{\\rtf1 body}'),
     ('jpg', b'\xff\xd8\xffbody'), ('jpeg', b'\xff\xd8\xffbody'),
     ('png', b'\x89PNG\r\n\x1a\nbody'),
+    ('xml', b'\xef\xbb\xbf \n<extract_about_property_land/>'),
 ])
 @pytest.mark.parametrize('compression', [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
 def test_read_supported_member_returns_unchanged_bytes_with_verified_hash_and_crc(fmt, content, compression):
@@ -180,6 +181,25 @@ def test_pdf_member_size_limit_cannot_expand(monkeypatch):
     raw = patch_headers(make_zip(), size=16 * 1024 * 1024 + 1)
     with pytest.raises(ValueError, match='размер записи'):
         archive.inspect(raw)
+
+
+def test_xml_has_separate_limit_without_opening_or_rejecting_other_members(monkeypatch):
+    raw = make_zip([('large.xml', b'<' + b'X' * archive.MAX_XML_BYTES), ('ok.pdf', PDF)], zipfile.ZIP_STORED)
+    monkeypatch.setattr(zlib, 'decompressobj', lambda *a, **k: pytest.fail('No unsupported XML read'))
+    manifest = archive.inspect(raw)
+    assert manifest['algorithm'] == 'archive-evidence-v2'
+    assert manifest['entries'][0]['state'] == 'unsupported'
+    assert '2 МиБ' in manifest['entries'][0]['reason']
+    with pytest.raises(ValueError, match='неподдержанного'):
+        archive.read_member(raw, archive.member_identifier(manifest, manifest['entries'][0]))
+    assert archive.read_member(raw, archive.member_identifier(manifest, manifest['entries'][1]))[0] == PDF
+
+
+@pytest.mark.parametrize('content', [b'MZexe', b'%PDF-1.7 wrong format', b'PK\x03\x04nested', b'plain private text'])
+def test_xml_extension_cannot_bypass_member_format_check(content):
+    raw = make_zip([('selected.xml', content)])
+    with pytest.raises(ValueError, match='содержимое не соответствует'):
+        archive.read_member(raw, identify(raw))
 
 
 @pytest.mark.parametrize('name,content', [('nested.zip', b'PK\x03\x04zip'), ('run.exe', b'MZexe'), ('x.txt', b'text'), ('folder/', b'')])
