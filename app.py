@@ -34,6 +34,7 @@ from land import scan_cells,scan_source,scan_review
 from land import torgi_docs
 from land import georeference
 from land import torgi_visual, torgi_pdf_local, torgi_large_pdf
+from land import torgi_archives, torgi_image_frames
 from land import recon, regional_documents, rgis_context, pzz_context
 
 ROOT = Path(__file__).resolve().parent
@@ -153,6 +154,27 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == '/api/municipal/ocr/page':
                 raw = ocr.preview(project, query.get('document', [''])[0], int(query.get('page', ['0'])[0]), int(query.get('view', ['1'])[0]))
                 return self.send(raw, content_type='image/png')
+            if p.path in ('/api/torgi/documents/archives','/api/torgi/documents/archives/export','/api/torgi/documents/archives/report','/api/torgi/active/documents/archives','/api/torgi/active/documents/archives/export','/api/torgi/active/documents/archives/report'):
+                regional='/active/' in p.path
+                selected=None
+                if 'lot_id' in query:
+                    catalog=store.get_setting(torgi_docs.setting_key(project,regional))
+                    search=store.get_setting(torgi.setting_key(project,regional))
+                    if not torgi_docs.same_search(search,catalog):raise ValueError('Поиск изменился; обновите карточки')
+                    selected=torgi_docs.selected_lot({'lot_id':query['lot_id'][0]},search,catalog,regional)
+                if p.path.endswith('/report'):return self.send(torgi_archives.html_report(project,regional,selected).encode('utf-8'),content_type='text/html; charset=utf-8')
+                return self.send(torgi_archives.summary(project,regional,selected),filename='archive-observations.json' if p.path.endswith('/export') else None)
+            if p.path in ('/api/torgi/documents/frames','/api/torgi/documents/frames/export','/api/torgi/documents/frames/report','/api/torgi/documents/frames/image','/api/torgi/active/documents/frames','/api/torgi/active/documents/frames/export','/api/torgi/active/documents/frames/report','/api/torgi/active/documents/frames/image'):
+                regional='/active/' in p.path
+                if p.path.endswith('/image'):return self.send(torgi_image_frames.frame_preview(project,query.get('file',[''])[0],int(query.get('frame',['1'])[0]),regional),content_type='image/png')
+                selected=None
+                if 'lot_id' in query:
+                    catalog=store.get_setting(torgi_docs.setting_key(project,regional))
+                    search=store.get_setting(torgi.setting_key(project,regional))
+                    if not torgi_docs.same_search(search,catalog):raise ValueError('Поиск изменился; обновите карточки')
+                    selected=torgi_docs.selected_lot({'lot_id':query['lot_id'][0]},search,catalog,regional)
+                if p.path.endswith('/report'):return self.send(torgi_image_frames.html_report(project,regional,selected).encode('utf-8'),content_type='text/html; charset=utf-8')
+                return self.send(torgi_image_frames.report(project,regional,selected),filename='mpo-frame-observations.json' if p.path.endswith('/export') else None)
             if p.path in ('/api/torgi/documents/image', '/api/torgi/active/documents/image'):
                 number = int(query['page'][0]) if 'page' in query else None
                 view = int(query.get('view', ['0'])[0]) if number is not None else None
@@ -223,6 +245,10 @@ class Handler(BaseHTTPRequestHandler):
                                   'pdf_local_attempt':pdf_local,
                                   'pdf_local_summary':torgi_pdf_local.summary(result or {}),
                                   'large_pdf_summary':torgi_large_pdf.summary(result or {},selected),
+                                  'archive_summary':torgi_archives.summary(project,regional,selected),
+                                  'image_frames_summary':torgi_image_frames.summary(result or {},search,store.get_setting(torgi_image_frames.setting_key(project,regional)),selected),
+                                  'image_frames_queue':torgi_image_frames.queue(result or {},search,store.get_setting(torgi_image_frames.setting_key(project,regional)),lot_id=selected),
+                                  'image_frames_retry_queue':torgi_image_frames.queue(result or {},search,store.get_setting(torgi_image_frames.setting_key(project,regional)),retry=True,lot_id=selected),
                                   'large_pdf_attempt':large_pdf,
                                   'selected_pdf_local_summary':torgi_pdf_local.summary(result or {},selected) if selected else None,
                                   'pdf_local_remaining':len(torgi_pdf_local.queue(result or {})),
@@ -424,6 +450,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Локальное дочитывание PDF торгов', lambda: torgi_pdf_local.run(project, data)))
             if path == '/api/torgi/documents/large-pdf':
                 return self.send(launch_job(project, 'Чтение одного крупного PDF торгов', lambda: torgi_large_pdf.run(project, data)))
+            if path == '/api/torgi/documents/archives':
+                return self.send(launch_job(project, 'Чтение одного ZIP торгов', lambda: torgi_archives.run(project,data,active=False)))
+            if path == '/api/torgi/documents/frames':
+                return self.send(launch_job(project, 'Чтение дополнительных кадров фото', lambda: torgi_image_frames.run(project,data)))
             if path == '/api/torgi/documents/ocr':
                 return self.send(launch_job(project, 'Локальное OCR изображений и PDF торгов', lambda: torgi_visual.run(project, data)))
             if path == '/api/torgi/active/documents':
@@ -438,6 +468,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(launch_job(project, 'Локальное дочитывание региональных PDF', lambda: torgi_pdf_local.run(project, data, active=True)))
             if path == '/api/torgi/active/documents/large-pdf':
                 return self.send(launch_job(project, 'Чтение одного крупного регионального PDF', lambda: torgi_large_pdf.run(project, data, active=True)))
+            if path == '/api/torgi/active/documents/archives':
+                return self.send(launch_job(project, 'Чтение одного регионального ZIP', lambda: torgi_archives.run(project,data,active=True)))
+            if path == '/api/torgi/active/documents/frames':
+                return self.send(launch_job(project, 'Чтение дополнительных кадров регионального фото', lambda: torgi_image_frames.run(project,data,active=True)))
             if path == '/api/torgi/active/documents/ocr':
                 return self.send(launch_job(project, 'Локальное OCR региональных схем', lambda: torgi_visual.run(project, data, active=True)))
             if path == '/api/publications':

@@ -17,12 +17,17 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const source=fs.readFileSync(process.argv[1],'utf8');
 const code=source.slice(0,source.indexOf('for(const [prefix,base] of torgiExtraSections)'));
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+const frameKey='c'.repeat(24),retryFrameKey='d'.repeat(24);
 const payload=(remaining,lot='',extra={})=>({result:{id:'catalog'},selected_lot_id:lot,
- search_stale:false,large_pdf_summary:{remaining,retry_remaining:remaining},...extra});
+ search_stale:false,large_pdf_summary:{remaining,retry_remaining:remaining},
+ archive_summary:{archive_count:2,remaining:2,retry_remaining:3},
+ image_frames_summary:{received:1,remaining:2,retry_remaining:3},
+ image_frames_queue:[{file_key:frameKey,frames:[1,2]}],
+ image_frames_retry_queue:[{file_key:retryFrameKey,frames:[1,2,3]}],...extra});
 function fixture(handler){
  const nodes={};const el=id=>nodes[id]??=({value:'',checked:false,disabled:false,textContent:''});
  const unrelated={disabled:true},enabled={disabled:false};
- const buttons=[el('torgi-doc-large-pdf'),el('regional-doc-large-pdf'),unrelated,enabled];
+ const buttons=[...['torgi-doc','regional-doc'].flatMap(prefix=>['large-pdf','archives','frames'].map(action=>el(prefix+'-'+action))),unrelated,enabled];
  const context=vm.createContext({api:handler,el,running:false,operationState:String,docErrorText:String,
   document:{querySelectorAll(selector){return selector==='button'?buttons:[]}},
   reconStale:false,sameReconBounds:()=>true,refreshRegionalDocs:async()=>{},
@@ -104,6 +109,78 @@ function fixture(handler){
   f.el('regional-doc-lot').value='LOT-A';
   await f.context.runTorgiExtra('regional-doc',base,'large-pdf');
   assert.equal(count,0);assert.ok(f.el('regional-doc-extra-status').textContent.includes('Не завершено'));
+ }
+ // Each new action reads its own queue; an empty large-PDF queue cannot block ZIP/MPO.
+ for(const action of ['archives','frames'])for(const retry of [false,true]){
+  posts=[];const observed=payload(0,'LOT-A');
+  f=fixture(async(url,args)=>{
+   if(args){posts.push({url,args});return {job_id:'job'};}
+   if(url.startsWith('/api/jobs/'))return {state:'done'};
+   return observed;
+  });
+  f.el('regional-doc-lot').value='LOT-A';f.el('regional-doc-extra-retry').checked=retry;
+  await f.context.refreshTorgiExtra('regional-doc',base);
+  assert.equal(f.el('regional-doc-large-pdf').disabled,true);
+  assert.equal(f.el('regional-doc-'+action).disabled,false);
+  assert.ok(f.el('regional-doc-extra-status').textContent.includes('OCR дополнительных кадров и сканов ZIP не выполнено'));
+  assert.equal(f.el('regional-doc-archives-report').href,base+'/archives/report?lot_id=LOT-A');
+  assert.equal(f.el('regional-doc-frames-export').href,base+'/frames/export?lot_id=LOT-A');
+  await f.context.runTorgiExtra('regional-doc',base,action);
+  assert.equal(posts.length,1);assert.equal(posts[0].url,base+'/'+action);
+  assert.equal(posts[0].args.id,'catalog');assert.equal(posts[0].args.lot_id,'LOT-A');
+  assert.equal(posts[0].args.retry_errors,retry);
+  if(action==='frames'){
+   assert.equal(posts[0].args.file_key,retry?retryFrameKey:frameKey);
+   assert.deepEqual(Array.from(posts[0].args.frames),retry?[1,2,3]:[1,2]);
+   const original=retry?observed.image_frames_retry_queue[0].frames:observed.image_frames_queue[0].frames;
+   assert.notEqual(posts[0].args.frames,original,'Frame selection must be copied from preflight evidence');
+  }else{
+   assert.equal(posts[0].args.file_key,undefined);assert.equal(posts[0].args.frames,undefined);
+  }
+ }
+ // Normal and explicit-retry queues stay separate, including a completed normal queue.
+ const retryOnly=payload(0,'LOT-A',{archive_summary:{remaining:0,retry_remaining:1},
+  image_frames_summary:{remaining:0,retry_remaining:1},image_frames_queue:[],
+  image_frames_retry_queue:[{file_key:retryFrameKey,frames:[1]}]});
+ f=fixture(async()=>retryOnly);f.el('regional-doc-lot').value='LOT-A';
+ await f.context.refreshTorgiExtra('regional-doc',base);
+ assert.equal(f.el('regional-doc-archives').disabled,true);assert.equal(f.el('regional-doc-frames').disabled,true);
+ f.el('regional-doc-extra-retry').checked=true;f.context.restoreTorgiExtraControls();
+ assert.equal(f.el('regional-doc-archives').disabled,false);assert.equal(f.el('regional-doc-frames').disabled,false);
+ // A malformed or absent current frame selection cannot start a job even with nonzero summary counters.
+ for(const entry of [null,{file_key:'../bad',frames:[1]},{file_key:frameKey,frames:[true]},
+  {file_key:frameKey,frames:[1,1]},{file_key:frameKey,frames:[0]},
+  {file_key:frameKey,frames:[16]},{file_key:frameKey,frames:[]}]){
+  let count=0;const observed=payload(0,'LOT-A',{image_frames_queue:entry?[entry]:[]});
+  f=fixture(async(url,args)=>{if(args)count++;return observed});
+  f.el('regional-doc-lot').value='LOT-A';await f.context.refreshTorgiExtra('regional-doc',base);
+  assert.equal(f.el('regional-doc-frames').disabled,true);
+  await f.context.runTorgiExtra('regional-doc',base,'frames');assert.equal(count,0);
+  assert.ok(f.el('regional-doc-extra-status').textContent.includes('Очередь дополнительных кадров изменилась'));
+ }
+ // Install the real controls: only GETs on load, exact routes, and read-only report/export links.
+ const nodes=new Map(),calls=[];
+ function node(){const element={value:'',checked:false,disabled:false,textContent:'',listeners:{},
+  append(){},after(){},setAttribute(){},addEventListener(event,callback){this.listeners[event]=callback}};
+  Object.defineProperty(element,'id',{set(id){nodes.set(id,element)},get(){return [...nodes].find(([,value])=>value===element)?.[0]}});
+  return element;
+ }
+ const el=id=>{if(!nodes.has(id)){const element=node();element.id=id;}return nodes.get(id)};
+ const installed=vm.createContext({el,api:async(url,args)=>{calls.push({url,args});assert.equal(args,undefined);return payload(0)},
+  running:false,operationState:String,docErrorText:String,
+  document:{createElement:node,createTextNode:text=>({textContent:text})}});
+ vm.runInContext(source,installed);await tick();
+ assert.equal(calls.length,2);
+ for(const [prefix,root] of [['torgi-doc','/api/torgi/documents'],['regional-doc',base]]){
+  assert.equal(el(prefix+'-archives').textContent,'Прочитать 1 ZIP');
+  assert.equal(el(prefix+'-frames').textContent,'Открыть дополнительные кадры 1 фото');
+  assert.equal(typeof el(prefix+'-archives').listeners.click,'function');
+  assert.equal(typeof el(prefix+'-frames').listeners.click,'function');
+  for(const action of ['archives','frames'])for(const view of ['report','export']){
+   assert.equal(el(prefix+'-'+action+'-'+view).href,root+'/'+action+'/'+view);
+  }
+  assert.equal(el(prefix+'-archives-report').target,'_blank');
+  assert.equal(el(prefix+'-frames-report').rel,'noopener noreferrer');
  }
 })().catch(error=>{console.error(error);process.exitCode=1});
 '''

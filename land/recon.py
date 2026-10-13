@@ -13,10 +13,10 @@ from shapely.ops import unary_union
 from . import store, survey, nspd, nspd_context, torgi, torgi_docs, planning_boundary, planning_watch, land_status, planning_regulations, planning_enquiry
 from .geometry import convert, polygons
 from .review import CHECKS
-from . import regional_documents, access_evidence, rgis_context, pzz_context, candidate_checks
+from . import regional_documents, access_evidence, rgis_context, pzz_context, candidate_checks, attachment_context
 
-VERSION=14
-KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context','pzz_context')
+VERSION=15
+KEYS=('survey','torgi','torgi_active','torgi_documents','torgi_active_documents','municipal','planning_watch','planning_maps','nspd_context','planning_boundary','planning_regulations','rgis_context','pzz_context','torgi_archives','torgi_active_archives','torgi_documents_image_frames','torgi_active_documents_image_frames')
 PURPOSES={'unspecified':'Цель пока не выбрана','housing':'ИЖС','personal_farm':'ЛПХ','agriculture':'Сельскохозяйственное использование'}
 WARNING='Контуры для проверки. Отсутствие полученного кадастрового объекта не подтверждает свободность земли. Права, полнота источников и допустимость использования не установлены.'
 HOSTS={'nspd.gov.ru','torgi.gov.ru','trudovskoe-rk.ru','simf.rk.gov.ru','simfmo-rk.ru','rgis.rk.gov.ru'}
@@ -291,7 +291,8 @@ def build(values,params):
                                                'scope':(historical or {}).get('history',{}).get('scope'),'complete':False}},
              'context':nspd_context.sources(context,s['bounds']),
              'rgis_context':rgis_context.sources(rgis,s['bounds']),
-             'pzz_context':pzz_context.sources(regional_pzz,s['bounds'])}
+             'pzz_context':pzz_context.sources(regional_pzz,s['bounds']),
+             'attachments':attachment_context.snapshot(values)}
     map_layers={mode:{'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':f['geometry'],'properties':{'label':public_fields(f).get('cad_num',str(f['id']))}} for f in layers.get(mode,{}).get('geojson',{}).get('features',[])]} for mode in ('parcels','buildings','restrictions')}
     for mode,records in entries.items():
         map_layers[mode]={'type':'FeatureCollection','features':[{'type':'Feature','id':f['id'],'geometry':mapping(shape(f['geometry']).intersection(boundary)),

@@ -29,7 +29,7 @@ def test_partial_genplan_survives_frozen_dossier_and_export_without_changing_con
     values['rgis_context']=context;after=recon.build(values,params)
     assert {c['id']:c['geometry'] for c in before['candidates']}=={c['id']:c['geometry'] for c in after['candidates']}
     assert before['summary']==after['summary']
-    assert after['version']==14 and after['sources']['rgis_context']['applied']
+    assert after['version']==15 and after['sources']['rgis_context']['applied']
     assert after['sources']['rgis_context']['layers']['functional']['received_count']==2
     for candidate in after['candidates']:
         zoning=next(row for row in candidate['check_progress']['rows'] if row['key']=='zoning')
